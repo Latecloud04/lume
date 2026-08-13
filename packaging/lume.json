@@ -1,0 +1,8 @@
+{
+  "appVersion": "1.1.1",
+  "bundleIdentifier": "local.lume.codex",
+  "displayName": "Lume",
+  "bundleName": "Lume",
+  "executable": "Lume",
+  "minimumMacOS": "14.0"
+}
