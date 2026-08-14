@@ -34,8 +34,8 @@ with open(sys.argv[1], "wb") as stream:
             "CFBundleIdentifier": "local.lume.codex",
             "CFBundleName": "Lume",
             "CFBundlePackageType": "APPL",
-            "CFBundleShortVersionString": "1.1.2",
-            "CFBundleVersion": "1.1.2",
+            "CFBundleShortVersionString": "1.1.3",
+            "CFBundleVersion": "1.1.3",
             "LSMinimumSystemVersion": "14.0",
             "LSUIElement": True,
         },
@@ -275,7 +275,7 @@ import sys
 with open(sys.argv[1], encoding="utf-8") as stream:
     config = json.load(stream)
 expected = {
-    "appVersion": "1.1.2",
+    "appVersion": "1.1.3",
     "bundleIdentifier": "local.lume.codex",
     "displayName": "Lume",
     "bundleName": "Lume",

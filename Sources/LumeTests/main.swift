@@ -8,14 +8,38 @@ private struct StubReader: UsageReader { let result: UsageReadResult; func read(
 private actor StubTransport: AppServerTransport { var lines: [String]; init(lines: [String]) { self.lines = lines }; func send(_: String) async throws {}; func receive() async throws -> String? { lines.isEmpty ? nil : lines.removeFirst() }; func terminate() async {} }
 private struct StubFactory: AppServerTransportFactory { let transport: StubTransport; func start() async throws -> any AppServerTransport { transport } }
 private struct AnyTransportFactory: AppServerTransportFactory { let transport: any AppServerTransport; func start() async throws -> any AppServerTransport { transport } }
+private final class ActivationProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    func record() {
+        lock.lock()
+        count += 1
+        lock.unlock()
+    }
+
+    var value: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return count
+    }
+}
 private struct StubCodex: CodexApplicationControlling {
     let frontmost: Bool
     let running: Bool
     let activated: Bool
     let launched: Bool
+    let activationProbe: ActivationProbe?
+    init(frontmost: Bool, running: Bool, activated: Bool, launched: Bool, activationProbe: ActivationProbe? = nil) {
+        self.frontmost = frontmost
+        self.running = running
+        self.activated = activated
+        self.launched = launched
+        self.activationProbe = activationProbe
+    }
     func isFrontmost(bundleIdentifier _: String) -> Bool { frontmost }
     func isRunning(bundleIdentifier _: String) -> Bool { running }
-    func activateRunning(bundleIdentifier _: String) async -> Bool { activated }
+    func activateRunning(bundleIdentifier _: String) async -> Bool { activationProbe?.record(); return activated }
     func launchConfirmed(bundleIdentifier _: String) async -> Bool { launched }
 }
 private struct StartFailureFactory: AppServerTransportFactory { let error: AppServerStartError; func start() async throws -> any AppServerTransport { throw error } }
@@ -95,11 +119,12 @@ private actor BlockingTransport: AppServerTransport {
         let slowResolution = await SolControlBridge(helperURL: slowHelper, installerURL: slowHelper).resolve()
         check(slowResolution == nil && Date().timeIntervalSince(slowStartedAt) < 5, "Sol Control helper calls time out without blocking Lume", failures: &failures)
         try? FileManager.default.removeItem(at: slowHelper)
-        let frontmostHandoff = await CodexHandoff(controller: StubCodex(frontmost: true, running: true, activated: true, launched: true)).perform()
+        let frontmostActivation = ActivationProbe()
+        let frontmostHandoff = await CodexHandoff(controller: StubCodex(frontmost: true, running: true, activated: true, launched: true, activationProbe: frontmostActivation)).perform()
         let launchedHandoff = await CodexHandoff(controller: StubCodex(frontmost: false, running: false, activated: false, launched: true)).perform()
         let unavailableHandoff = await CodexHandoff(controller: StubCodex(frontmost: false, running: false, activated: false, launched: false)).perform()
         let failedActivation = await CodexHandoff(controller: StubCodex(frontmost: false, running: true, activated: false, launched: true)).perform()
-        check(frontmostHandoff == .alreadyFrontmost, "handoff leaves frontmost Codex alone", failures: &failures)
+        check(frontmostHandoff == .alreadyFrontmost && frontmostActivation.value == 1, "handoff reactivates frontmost Codex so a minimized window is restored", failures: &failures)
         check(launchedHandoff == .launched, "handoff launches installed Codex", failures: &failures)
         check(unavailableHandoff == .unavailable, "handoff keeps Lume available when Codex is absent", failures: &failures)
         check(failedActivation == .failed, "handoff does not launch a second Codex when running activation fails", failures: &failures)

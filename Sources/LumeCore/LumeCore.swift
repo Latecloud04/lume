@@ -464,9 +464,10 @@ public struct CodexHandoff: Sendable {
     }
 
     public func perform() async -> HandoffResult {
-        if controller.isFrontmost(bundleIdentifier: Self.bundleIdentifier) { return .alreadyFrontmost }
+        let wasFrontmost = controller.isFrontmost(bundleIdentifier: Self.bundleIdentifier)
         if controller.isRunning(bundleIdentifier: Self.bundleIdentifier) {
-            return await controller.activateRunning(bundleIdentifier: Self.bundleIdentifier) ? .activated : .failed
+            guard await controller.activateRunning(bundleIdentifier: Self.bundleIdentifier) else { return .failed }
+            return wasFrontmost ? .alreadyFrontmost : .activated
         }
         return await controller.launchConfirmed(bundleIdentifier: Self.bundleIdentifier) ? .launched : .unavailable
     }
