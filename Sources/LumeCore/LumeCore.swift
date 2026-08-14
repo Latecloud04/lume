@@ -452,7 +452,7 @@ public struct CodexAppServerUsageReader: UsageReader {
 public protocol CodexApplicationControlling: Sendable {
     func isFrontmost(bundleIdentifier: String) -> Bool
     func isRunning(bundleIdentifier: String) -> Bool
-    func activateRunning(bundleIdentifier: String) -> Bool
+    func activateRunning(bundleIdentifier: String) async -> Bool
     func launchConfirmed(bundleIdentifier: String) async -> Bool
 }
 
@@ -466,7 +466,7 @@ public struct CodexHandoff: Sendable {
     public func perform() async -> HandoffResult {
         if controller.isFrontmost(bundleIdentifier: Self.bundleIdentifier) { return .alreadyFrontmost }
         if controller.isRunning(bundleIdentifier: Self.bundleIdentifier) {
-            return controller.activateRunning(bundleIdentifier: Self.bundleIdentifier) ? .activated : .failed
+            return await controller.activateRunning(bundleIdentifier: Self.bundleIdentifier) ? .activated : .failed
         }
         return await controller.launchConfirmed(bundleIdentifier: Self.bundleIdentifier) ? .launched : .unavailable
     }
@@ -531,18 +531,42 @@ private final class ProcessAppServerTransport: @unchecked Sendable, AppServerTra
 }
 
 public protocol CodexExecutableLocating: Sendable { func locate() -> URL? }
-public struct SystemCodexExecutableLocator: CodexExecutableLocating {
-    public init() {}
+public struct SystemCodexExecutableLocator: @unchecked Sendable, CodexExecutableLocating {
+    private let environment: [String: String]
+    private let homeDirectory: URL
+    private let applicationResources: URL?
+    private let isExecutable: @Sendable (String) -> Bool
+
+    public init() {
+        environment = ProcessInfo.processInfo.environment
+        homeDirectory = FileManager.default.homeDirectoryForCurrentUser
+        applicationResources = NSWorkspace.shared
+            .urlForApplication(withBundleIdentifier: CodexHandoff.bundleIdentifier)
+            .flatMap { Bundle(url: $0)?.resourceURL }
+        isExecutable = { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+
+    public init(
+        environment: [String: String],
+        homeDirectory: URL,
+        applicationResources: URL?,
+        isExecutable: @escaping @Sendable (String) -> Bool
+    ) {
+        self.environment = environment
+        self.homeDirectory = homeDirectory
+        self.applicationResources = applicationResources
+        self.isExecutable = isExecutable
+    }
+
     public func locate() -> URL? {
-        let pathEntries = (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map(String.init)
-        let homeLocalBin = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/codex")
-        let knownPaths = pathEntries.map { URL(fileURLWithPath: $0).appendingPathComponent("codex") } +
+        let bundledCandidates = applicationResources.map {
+            [$0.appendingPathComponent("codex"), $0.appendingPathComponent("bin/codex")]
+        } ?? []
+        let pathEntries = (environment["PATH"] ?? "").split(separator: ":").map(String.init)
+        let homeLocalBin = homeDirectory.appendingPathComponent(".local/bin/codex")
+        let commandLineCandidates = pathEntries.map { URL(fileURLWithPath: $0).appendingPathComponent("codex") } +
             [homeLocalBin, URL(fileURLWithPath: "/opt/homebrew/bin/codex"), URL(fileURLWithPath: "/usr/local/bin/codex")]
-        if let executable = knownPaths.first(where: { FileManager.default.isExecutableFile(atPath: $0.path) }) { return executable }
-        guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: CodexHandoff.bundleIdentifier),
-              let resources = Bundle(url: appURL)?.resourceURL else { return nil }
-        let bundledCandidates = [resources.appendingPathComponent("codex"), resources.appendingPathComponent("bin/codex")]
-        return bundledCandidates.first(where: { FileManager.default.isExecutableFile(atPath: $0.path) })
+        return (bundledCandidates + commandLineCandidates).first(where: { isExecutable($0.path) })
     }
 }
 
@@ -681,14 +705,20 @@ public final class WorkspaceCodexApplicationController: @unchecked Sendable, Cod
     public func isRunning(bundleIdentifier: String) -> Bool {
         !NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).isEmpty
     }
-    public func activateRunning(bundleIdentifier: String) -> Bool {
+    public func activateRunning(bundleIdentifier: String) async -> Bool {
         guard let application = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).first else { return false }
         if application.isHidden { application.unhide() }
-        return application.activate(options: [.activateAllWindows])
+        _ = application.activate(options: [.activateAllWindows])
+        return await requestForeground(bundleIdentifier: bundleIdentifier)
     }
     public func launchConfirmed(bundleIdentifier: String) async -> Bool {
+        await requestForeground(bundleIdentifier: bundleIdentifier)
+    }
+
+    private func requestForeground(bundleIdentifier: String) async -> Bool {
         guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) else { return false }
-        let configuration = NSWorkspace.OpenConfiguration(); configuration.activates = true
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
         return await withCheckedContinuation { continuation in
             NSWorkspace.shared.openApplication(at: url, configuration: configuration) { application, error in
                 continuation.resume(returning: application != nil && error == nil)

@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import LumeCore
 
@@ -14,7 +15,7 @@ private struct StubCodex: CodexApplicationControlling {
     let launched: Bool
     func isFrontmost(bundleIdentifier _: String) -> Bool { frontmost }
     func isRunning(bundleIdentifier _: String) -> Bool { running }
-    func activateRunning(bundleIdentifier _: String) -> Bool { activated }
+    func activateRunning(bundleIdentifier _: String) async -> Bool { activated }
     func launchConfirmed(bundleIdentifier _: String) async -> Bool { launched }
 }
 private struct StartFailureFactory: AppServerTransportFactory { let error: AppServerStartError; func start() async throws -> any AppServerTransport { throw error } }
@@ -33,7 +34,32 @@ private actor BlockingTransport: AppServerTransport {
             print("LIVE status=\(result.status.rawValue) value=\(result.remainingPercentage.map(String.init) ?? "--") code=\(result.failureCode.rawValue) durationMs=\(Int(result.duration * 1_000))")
             exit(result.status == .success ? 0 : 1)
         }
+        if CommandLine.arguments.contains("--live-handoff") {
+            let finder = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder").first
+            _ = finder?.activate(options: [.activateAllWindows])
+            try? await Task.sleep(for: .milliseconds(500))
+            let before = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "nil"
+            let result = await CodexHandoff().perform()
+            try? await Task.sleep(for: .seconds(1))
+            let after = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "nil"
+            print("HANDOFF before=\(before) result=\(result) after=\(after)")
+            let accepted = result == .activated || result == .alreadyFrontmost
+            exit(accepted && after == CodexHandoff.bundleIdentifier ? 0 : 1)
+        }
         var failures = 0; let epoch = Date(timeIntervalSince1970: 0)
+        let fakeHome = URL(fileURLWithPath: "/Users/tester")
+        let fakeResources = URL(fileURLWithPath: "/Applications/Codex.app/Contents/Resources")
+        let executablePaths = Set([
+            fakeHome.appendingPathComponent(".local/bin/codex").path,
+            fakeResources.appendingPathComponent("codex").path,
+        ])
+        let guiLocator = SystemCodexExecutableLocator(
+            environment: ["PATH": "/usr/bin:/bin"],
+            homeDirectory: fakeHome,
+            applicationResources: fakeResources,
+            isExecutable: { executablePaths.contains($0) }
+        )
+        check(guiLocator.locate() == fakeResources.appendingPathComponent("codex"), "GUI discovery prefers the self-contained Codex app executable over a PATH-dependent wrapper", failures: &failures)
         check(LumeState.empty(now: epoch).displayValue == "--", "unavailable state displays dashes", failures: &failures)
         check(LumeColor.forRemaining(50) == .mint && LumeColor.forRemaining(49) == .orange && LumeColor.forRemaining(20) == .orange && LumeColor.forRemaining(19) == .red, "thresholds exactly match specification", failures: &failures)
         check(PanelGeometry.isClick(from: .zero, to: CGPoint(x: 2.99, y: 0)) && !PanelGeometry.isClick(from: .zero, to: CGPoint(x: 3, y: 0)), "three point movement distinguishes click from drag", failures: &failures)
