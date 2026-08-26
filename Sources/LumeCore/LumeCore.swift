@@ -720,7 +720,7 @@ public final class LumePreferencesStore: @unchecked Sendable {
 }
 
 public enum SolControlConfiguredMode: String, Codable, CaseIterable, Sendable {
-    case auto, openai
+    case openai
     case quotaSave = "quota-save"
 }
 
@@ -756,20 +756,6 @@ public struct SolControlBridge: Sendable {
               FileManager.default.isReadableFile(atPath: installer.path)
         else { return nil }
         return SolControlBridge(helperURL: helper, installerURL: installer)
-    }
-
-    public func publish(_ result: UsageReadResult) async -> SolControlResolution? {
-        guard result.status == .success, let exact = result.remainingPercentageExact else { return await resolve() }
-        var arguments = [
-            helperURL.path, "publish",
-            "--remaining", String(exact),
-            "--observed-at", String(result.observedAt.timeIntervalSince1970),
-        ]
-        if let resetsAt = result.resetsAt {
-            arguments += ["--resets-at", String(resetsAt.timeIntervalSince1970)]
-        }
-        guard await run(executable: URL(fileURLWithPath: "/usr/bin/python3"), arguments: arguments) != nil else { return nil }
-        return await resolve()
     }
 
     public func resolve() async -> SolControlResolution? {

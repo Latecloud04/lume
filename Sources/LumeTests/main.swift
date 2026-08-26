@@ -55,7 +55,7 @@ private actor BlockingTransport: AppServerTransport {
     static func main() async {
         if CommandLine.arguments.contains("--live") {
             let result = await DiscoveredCodexUsageReader().read()
-            print("LIVE status=\(result.status.rawValue) value=\(result.remainingPercentage.map(String.init) ?? "--") code=\(result.failureCode.rawValue) durationMs=\(Int(result.duration * 1_000))")
+            print("LIVE status=\(result.status.rawValue) 5H=\(result.fiveHour?.remainingPercentage.description ?? "--") 7D=\(result.sevenDay?.remainingPercentage.description ?? "--") code=\(result.failureCode.rawValue) durationMs=\(Int(result.duration * 1_000))")
             exit(result.status == .success ? 0 : 1)
         }
         if CommandLine.arguments.contains("--live-handoff") {
@@ -71,6 +71,7 @@ private actor BlockingTransport: AppServerTransport {
             exit(accepted && after == CodexHandoff.bundleIdentifier ? 0 : 1)
         }
         var failures = 0; let epoch = Date(timeIntervalSince1970: 0)
+        check(Set(SolControlConfiguredMode.allCases.map(\.rawValue)) == Set(["openai", "quota-save"]), "Sol Control exposes only the two persistent user-selected modes", failures: &failures)
         check(PanelGeometry.ringHitSize == CGSize(width: 48, height: 48) && PanelGeometry.ringVisibleDiameter == 44, "dual-ring geometry preserves a forty-four point visible circle inside a forty-eight point hit target", failures: &failures)
         check(PanelGeometry.railHitSize == CGSize(width: 24, height: 64) && PanelGeometry.railVisibleSize == CGSize(width: 10, height: 54), "dual-rail geometry preserves the specified visible and hit sizes", failures: &failures)
         let fakeHome = URL(fileURLWithPath: "/Users/tester")

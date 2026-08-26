@@ -144,7 +144,7 @@ fi
 [[ -f "$PACKAGE_MANIFEST" ]] || die "Lume Swift package is missing: $PACKAGE_MANIFEST"
 [[ -f "$ICON_SOURCE" ]] || die "Lume icon drawing source is missing: $ICON_SOURCE"
 [[ -f "$ICON_SVG_SOURCE" ]] || die "Lume icon SVG source is missing: $ICON_SVG_SOURCE"
-for integration_file in lume_policy.py user_prompt_submit.py sol-control-mode.md install.sh; do
+for integration_file in lume_policy.py sol-control-mode.md install.sh; do
   [[ -f "$INTEGRATION_SOURCE/$integration_file" ]] \
     || die "Lume Sol Control integration resource is missing: $INTEGRATION_SOURCE/$integration_file"
 done
@@ -244,11 +244,10 @@ mkdir -p "$ICONSET_STAGE"
 "$ICONUTIL_BIN" -c icns "$ICONSET_STAGE" -o "$RESOURCES_STAGE/Lume.icns"
 [[ -s "$RESOURCES_STAGE/Lume.icns" ]] || die "generated Lume.icns is missing or empty"
 mkdir -p "$RESOURCES_STAGE/SolControlIntegration"
-for integration_file in lume_policy.py user_prompt_submit.py sol-control-mode.md install.sh; do
+for integration_file in lume_policy.py sol-control-mode.md install.sh; do
   cp "$INTEGRATION_SOURCE/$integration_file" "$RESOURCES_STAGE/SolControlIntegration/$integration_file"
 done
 chmod 0755 "$RESOURCES_STAGE/SolControlIntegration/lume_policy.py" \
-  "$RESOURCES_STAGE/SolControlIntegration/user_prompt_submit.py" \
   "$RESOURCES_STAGE/SolControlIntegration/install.sh"
 chmod 0644 "$RESOURCES_STAGE/SolControlIntegration/sol-control-mode.md"
 

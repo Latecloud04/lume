@@ -1,6 +1,5 @@
 import AppKit
 import LumeCore
-@preconcurrency import UserNotifications
 
 @main
 struct LumeMain {
@@ -23,7 +22,6 @@ final class LumeAppDelegate: NSObject, NSApplicationDelegate {
     private var coordinator: UsageRefreshCoordinator?
     private let launchAtLogin = SystemLaunchAtLoginProvider()
     private var refreshTimer: Timer?
-    private var breathingTimer: Timer?
     private var warningTimer: Timer?
     private var refreshStatus: UsageReadStatus = .failed
     private var warning: String?
@@ -31,8 +29,6 @@ final class LumeAppDelegate: NSObject, NSApplicationDelegate {
     private var solControlBridge: SolControlBridge?
     private var solControlDoctor: SolControlDoctor?
     private var solControlResolution: SolControlResolution?
-    private var lowQuotaNotificationArmed = true
-    private var lowQuotaNotificationPending = false
 
     func applicationDidFinishLaunching(_: Notification) {
         preferences = preferencesStore.load(now: Date())
@@ -45,7 +41,6 @@ final class LumeAppDelegate: NSObject, NSApplicationDelegate {
         }
         refreshStatus = state.lastStatus
         lastUpdateAt = state.lastSuccessfulAt
-        lowQuotaNotificationArmed = UserDefaults.standard.object(forKey: "Lume.lowQuotaNotificationArmed") as? Bool ?? true
         solControlBridge = SolControlBridge.bundled(resourceURL: Bundle.main.resourceURL)
         coordinator = UsageRefreshCoordinator(reader: DiscoveredCodexUsageReader())
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -58,13 +53,11 @@ final class LumeAppDelegate: NSObject, NSApplicationDelegate {
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in Task { @MainActor in self?.refresh(reason: .timer) } }
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(systemDidWake), name: NSWorkspace.didWakeNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(screenParametersDidChange), name: NSApplication.didChangeScreenParametersNotification, object: nil)
-        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(accessibilityDisplayOptionsDidChange), name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
         DistributedNotificationCenter.default().addObserver(self, selector: #selector(systemDidWake), name: Notification.Name("com.apple.screenIsUnlocked"), object: nil)
     }
 
     func applicationWillTerminate(_: Notification) {
         refreshTimer?.invalidate()
-        breathingTimer?.invalidate()
         warningTimer?.invalidate()
         NotificationCenter.default.removeObserver(self)
         NSWorkspace.shared.notificationCenter.removeObserver(self)
@@ -74,7 +67,6 @@ final class LumeAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func systemDidWake(_: Notification) { refresh(reason: .wake) }
-    @objc private func accessibilityDisplayOptionsDidChange(_: Notification) { updateBreathing() }
     @objc private func screenParametersDidChange(_: Notification) {
         guard panel != nil else { return }
         restorePlacement()
@@ -89,7 +81,7 @@ final class LumeAppDelegate: NSObject, NSApplicationDelegate {
         }
     }
     @objc private func togglePanel(_: Any?) {
-        if panel?.isVisible == true { persistFrame(); panel?.orderOut(nil); preferences.isPanelVisible = false; updateBreathing() }
+        if panel?.isVisible == true { persistFrame(); panel?.orderOut(nil); preferences.isPanelVisible = false }
         else { preferences.isPanelVisible = true; showPanel() }
         preferencesStore.save(preferences)
         statusItem?.menu = makeMenu()
@@ -120,9 +112,9 @@ final class LumeAppDelegate: NSObject, NSApplicationDelegate {
             }
         }
     }
-    @objc private func setSolControlAuto(_: Any?) { setSolControlMode(.auto) }
     @objc private func setSolControlOpenAI(_: Any?) { setSolControlMode(.openai) }
     @objc private func setSolControlQuotaSave(_: Any?) { setSolControlMode(.quotaSave) }
+    @objc private func checkSolControlStatus(_: Any?) { refreshSolControlStatus() }
 
     private func setSolControlMode(_ mode: SolControlConfiguredMode) {
         guard let bridge = solControlBridge else { showWarning("联动资源不可用"); return }
@@ -167,7 +159,7 @@ final class LumeAppDelegate: NSObject, NSApplicationDelegate {
             enable.target = self
             return menu
         }
-        let configured = ["helper", "hook", "skill", "hookConfig"].allSatisfy { doctor.checks[$0] == true }
+        let configured = ["helper", "skill"].allSatisfy { doctor.checks[$0] == true }
         guard configured, let resolution = solControlResolution else {
             let status = menu.addItem(withTitle: "联动未安装", action: nil, keyEquivalent: "")
             status.isEnabled = false
@@ -175,34 +167,33 @@ final class LumeAppDelegate: NSObject, NSApplicationDelegate {
             enable.target = self
             return menu
         }
-        let statusTitle = doctor.available ? solControlStatusTitle(resolution) : "等待下一次 Sol Control 调用验证"
+        let statusTitle = doctor.available ? solControlStatusTitle(resolution) : "Sol Control 状态待检查"
         let current = menu.addItem(withTitle: statusTitle, action: nil, keyEquivalent: "")
         current.isEnabled = false
         menu.addItem(.separator())
         let entries: [(String, SolControlConfiguredMode, Selector)] = [
-            ("自动", .auto, #selector(setSolControlAuto(_:))),
-            ("强制 OpenAI", .openai, #selector(setSolControlOpenAI(_:))),
-            ("强制 quota-save", .quotaSave, #selector(setSolControlQuotaSave(_:))),
+            ("OpenAI", .openai, #selector(setSolControlOpenAI(_:))),
+            ("quota-save", .quotaSave, #selector(setSolControlQuotaSave(_:))),
         ]
         for (title, mode, action) in entries {
             let item = menu.addItem(withTitle: title, action: action, keyEquivalent: "")
             item.target = self
             item.state = resolution.configuredMode == mode.rawValue ? .on : .off
         }
+        menu.addItem(.separator())
+        let check = menu.addItem(withTitle: "检查状态", action: #selector(checkSolControlStatus(_:)), keyEquivalent: "")
+        check.target = self
         return menu
     }
 
     private func solControlStatusTitle(_ resolution: SolControlResolution) -> String {
         switch resolution.configuredMode {
         case SolControlConfiguredMode.openai.rawValue:
-            return "当前有效：强制 OpenAI"
+            return "当前模式：OpenAI"
         case SolControlConfiguredMode.quotaSave.rawValue:
-            return "当前有效：强制 quota-save"
+            return "当前模式：quota-save"
         default:
-            let allowance = resolution.remainingPercentage.map { value in
-                value.rounded() == value ? String(Int(value)) : String(format: "%.1f", value)
-            } ?? "--"
-            return "当前有效：\(resolution.mode) · 7D \(allowance)%"
+            return "当前模式：OpenAI"
         }
     }
 
@@ -223,11 +214,6 @@ final class LumeAppDelegate: NSObject, NSApplicationDelegate {
             else { showWarning("Usage update unavailable", beep: false) }
             LumeLog.record(result)
             preferencesStore.save(preferences)
-            if let bridge = solControlBridge {
-                solControlResolution = await bridge.publish(result)
-                solControlDoctor = await bridge.doctor()
-                handleLowQuotaNotification(result: result, resolution: solControlResolution)
-            }
             statusItem?.menu = makeMenu()
             updatePresentation()
         }
@@ -251,36 +237,6 @@ final class LumeAppDelegate: NSObject, NSApplicationDelegate {
             solControlResolution = await bridge.resolve()
         }
         statusItem?.menu = makeMenu()
-    }
-
-    private func handleLowQuotaNotification(result: UsageReadResult, resolution: SolControlResolution?) {
-        guard result.status == .success, let remaining = result.remainingPercentageExact else { return }
-        if remaining >= 25 {
-            if !lowQuotaNotificationArmed {
-                lowQuotaNotificationArmed = true
-                UserDefaults.standard.set(true, forKey: "Lume.lowQuotaNotificationArmed")
-            }
-            return
-        }
-        guard remaining < 20, lowQuotaNotificationArmed, !lowQuotaNotificationPending else { return }
-        lowQuotaNotificationPending = true
-        let forcedOpenAI = resolution?.configuredMode == SolControlConfiguredMode.openai.rawValue
-        let content = UNMutableNotificationContent()
-        content.title = "Codex 7D 额度低"
-        content.body = forcedOpenAI
-            ? "剩余 \(String(format: "%.1f", remaining))%，但 Sol Control 当前为强制 OpenAI。"
-            : "剩余 \(String(format: "%.1f", remaining))%，后续 Sol Control 将使用 quota-save。"
-        let center = UNUserNotificationCenter.current()
-        center.requestAuthorization(options: [.alert, .sound]) { [weak self] allowed, _ in
-            Task { @MainActor in
-                guard let self else { return }
-                self.lowQuotaNotificationPending = false
-                self.lowQuotaNotificationArmed = false
-                UserDefaults.standard.set(false, forKey: "Lume.lowQuotaNotificationArmed")
-                guard allowed else { return }
-                try? await center.add(UNNotificationRequest(identifier: "lume.low-quota", content: content, trigger: nil))
-            }
-        }
     }
 
     private func showPanel() {
@@ -367,25 +323,6 @@ final class LumeAppDelegate: NSObject, NSApplicationDelegate {
                     guard let self else { return }
                     NSMenu.popUpContextMenu(self.makeMenu(), with: event, for: view)
                 })
-        }
-        updateBreathing()
-    }
-
-    private func updateBreathing() {
-        breathingTimer?.invalidate()
-        guard let panel,
-              panel.isVisible,
-              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
-              (state.visiblePercentage(at: Date()) ?? 100) < 10
-        else { panel?.alphaValue = 1; return }
-        var dimmed = false
-        breathingTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak panel] _ in
-            guard let panel, panel.isVisible else { return }
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 1
-                panel.animator().alphaValue = dimmed ? 1 : 0.88
-            }
-            dimmed.toggle()
         }
     }
 
@@ -484,7 +421,7 @@ final class LumeAppDelegate: NSObject, NSApplicationDelegate {
         state.presentation = .ring; preferences.state = state; preferences.dockSide = nil
         syncPanelContent()
         let destination = NSRect(origin: origin, size: PanelGeometry.ringHitSize)
-        animate(panel, to: destination, duration: 0.20) { [weak self] in self?.updatePresentation() }
+        animate(panel, to: destination, duration: 0.22) { [weak self] in self?.updatePresentation() }
         preferences.panelOriginX = destination.origin.x; preferences.panelOriginY = destination.origin.y
         preferences.screenIdentifier = display.identifier
         preferencesStore.save(preferences)

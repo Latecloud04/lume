@@ -165,14 +165,14 @@ verify_app() {
   [[ -d "$resources/SolControlIntegration" ]] || die "Sol Control integration resources are missing"
   while IFS= read -r -d '' path; do
     case "$(basename "$path")" in
-      lume_policy.py|user_prompt_submit.py|sol-control-mode.md|install.sh)
+      lume_policy.py|sol-control-mode.md|install.sh)
         ;;
       *)
         die "unexpected Sol Control integration sidecar: ${path#"$app"/}"
         ;;
     esac
   done < <(find "$resources/SolControlIntegration" -mindepth 1 -maxdepth 1 -print0)
-  for integration_file in lume_policy.py user_prompt_submit.py sol-control-mode.md install.sh; do
+  for integration_file in lume_policy.py sol-control-mode.md install.sh; do
     [[ -f "$resources/SolControlIntegration/$integration_file" ]] \
       || die "missing Sol Control integration resource: $integration_file"
   done

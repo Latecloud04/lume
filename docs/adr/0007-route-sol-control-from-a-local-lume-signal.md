@@ -1,3 +1,5 @@
 # Route Sol Control from a local Lume signal
 
+Status: Superseded by [ADR 0008](0008-use-user-selected-sol-control-modes.md).
+
 Lume publishes only an expiring, machine-readable 7D allowance fact, while Sol Control owns persistent routing preference and resolves the effective mode immediately before each new worker spawn. We use a `UserPromptSubmit` Hook to bind the state to explicit Sol Control turns rather than injecting a message into an unknown Codex Desktop thread, which would create a turn, consume allowance, and could target the wrong conversation. Persistent `auto`, `openai`, and `quota-save` choices override automatic routing; existing workers never migrate when the signal changes.
