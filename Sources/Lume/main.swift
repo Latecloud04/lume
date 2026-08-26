@@ -140,18 +140,18 @@ final class LumeAppDelegate: NSObject, NSApplicationDelegate {
         for (index, entry) in model.items.enumerated() {
             let item: NSMenuItem
             switch index {
-            case 2: item = menu.addItem(withTitle: entry.title, action: #selector(openCodex(_:)), keyEquivalent: ""); item.target = self
-            case 3: item = menu.addItem(withTitle: entry.title, action: #selector(togglePanel(_:)), keyEquivalent: ""); item.target = self
-            case 4: item = menu.addItem(withTitle: entry.title, action: #selector(refresh(_:)), keyEquivalent: ""); item.target = self
-            case 5:
+            case 3: item = menu.addItem(withTitle: entry.title, action: #selector(openCodex(_:)), keyEquivalent: ""); item.target = self
+            case 4: item = menu.addItem(withTitle: entry.title, action: #selector(togglePanel(_:)), keyEquivalent: ""); item.target = self
+            case 5: item = menu.addItem(withTitle: entry.title, action: #selector(refresh(_:)), keyEquivalent: ""); item.target = self
+            case 6:
                 item = menu.addItem(withTitle: entry.title, action: #selector(toggleLaunchAtLogin(_:)), keyEquivalent: "")
                 item.target = self
                 item.state = launchAtLogin.isEnabled ? .on : .off
-            case 6:
+            case 7:
                 item = menu.addItem(withTitle: entry.title, action: nil, keyEquivalent: "")
                 item.submenu = makeSolControlMenu()
-            case 7: item = menu.addItem(withTitle: entry.title, action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: ""); item.target = NSApp
-            case 8: item = menu.addItem(withTitle: entry.title, action: #selector(quit(_:)), keyEquivalent: "q"); item.target = self
+            case 8: item = menu.addItem(withTitle: entry.title, action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: ""); item.target = NSApp
+            case 9: item = menu.addItem(withTitle: entry.title, action: #selector(quit(_:)), keyEquivalent: "q"); item.target = self
             default: item = menu.addItem(withTitle: entry.title, action: nil, keyEquivalent: "")
             }
         }
@@ -555,13 +555,18 @@ private final class LumePanelView: NSView {
     private let pointerReleased: (CGPoint, CGPoint) -> Void
     private let showContextMenu: (NSEvent, NSView) -> Void
     private var startGlobal = CGPoint.zero
+    private var displayedFiveHour: CGFloat?
+    private var displayedSevenDay: CGFloat?
+    private var progressTimer: Timer?
 
     init(state: LumeState, dockSide: DockSide?, preview: DockSide?, warning: String?, pointerStarted: @escaping () -> Void, pointerMoved: @escaping (CGPoint, CGPoint) -> Void, pointerReleased: @escaping (CGPoint, CGPoint) -> Void, showContextMenu: @escaping (NSEvent, NSView) -> Void) {
         self.state = state; self.dockSide = dockSide; self.preview = preview; self.warning = warning; self.pointerStarted = pointerStarted; self.pointerMoved = pointerMoved; self.pointerReleased = pointerReleased; self.showContextMenu = showContextMenu
+        displayedFiveHour = state.fiveHour.visiblePercentageExact(at: Date()).map { CGFloat($0) }
+        displayedSevenDay = state.sevenDay.visiblePercentageExact(at: Date()).map { CGFloat($0) }
         super.init(frame: .init(origin: .zero, size: state.presentation == .ring ? PanelGeometry.ringHitSize : PanelGeometry.railHitSize))
         wantsLayer = true
         setAccessibilityElement(true)
-        setAccessibilityLabel(state.visiblePercentage(at: Date()).map { "Codex 7D remaining \($0) percent" } ?? "Codex 7D unavailable")
+        updateAccessibilityAndTooltip(now: Date())
         setAccessibilityHelp(Self.accessibilityHelp(for: PanelVisual.resolved(presentation: state.presentation, dockSide: dockSide)))
     }
     required init?(coder: NSCoder) { nil }
@@ -572,13 +577,21 @@ private final class LumePanelView: NSView {
     override func rightMouseDown(with event: NSEvent) { showContextMenu(event, self) }
 
     func update(state: LumeState, dockSide: DockSide?, preview: DockSide?, warning: String?) {
+        let previousFiveHour = displayedFiveHour
+        let previousSevenDay = displayedSevenDay
         self.state = state
         self.dockSide = dockSide
         self.preview = preview
         self.warning = warning
-        setAccessibilityLabel(state.visiblePercentage(at: Date()).map { "Codex 7D remaining \($0) percent" } ?? "Codex 7D unavailable")
+        let now = Date()
+        updateAccessibilityAndTooltip(now: now)
         setAccessibilityHelp(Self.accessibilityHelp(for: PanelVisual.resolved(presentation: state.presentation, dockSide: dockSide)))
-        needsDisplay = true
+        animateProgress(
+            fromFiveHour: previousFiveHour,
+            toFiveHour: state.fiveHour.visiblePercentageExact(at: now).map { CGFloat($0) },
+            fromSevenDay: previousSevenDay,
+            toSevenDay: state.sevenDay.visiblePercentageExact(at: now).map { CGFloat($0) }
+        )
     }
 
     func setPreview(_ preview: DockSide?) {
@@ -588,35 +601,90 @@ private final class LumePanelView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let color = nsColor(state.color(at: Date()))
+        let now = Date()
         switch PanelVisual.resolved(presentation: state.presentation, dockSide: dockSide) {
         case .ring:
             NSGraphicsContext.saveGraphicsState()
             NSColor.windowBackgroundColor.withAlphaComponent(0.94).setFill()
-            NSBezierPath(ovalIn: NSRect(x: 2, y: 2, width: 36, height: 36)).fill()
-            let ringBounds = NSRect(x: 3, y: 3, width: 34, height: 34)
-            let track = NSBezierPath(ovalIn: ringBounds); track.lineWidth = 2; NSColor.quaternaryLabelColor.setStroke(); track.stroke()
-            if let percentage = state.visiblePercentage(at: Date()) {
-                let progress = NSBezierPath()
-                progress.appendArc(withCenter: CGPoint(x: 20, y: 20), radius: 17, startAngle: 90, endAngle: 90 - 360 * CGFloat(percentage) / 100, clockwise: true)
-                progress.lineWidth = 2; progress.lineCapStyle = .round; color.setStroke(); progress.stroke()
-            }
-            let value = state.visiblePercentage(at: Date()).map { "\($0)%" } ?? "--"
-            drawCentered(value, y: 16, font: .monospacedDigitSystemFont(ofSize: 10, weight: .bold), color: .labelColor)
-            drawCentered("7D", y: 7, font: .systemFont(ofSize: 7, weight: .medium), color: .secondaryLabelColor)
-            if state.isStale(at: Date()) { NSColor.systemOrange.setFill(); NSBezierPath(ovalIn: NSRect(x: 32, y: 32, width: 4, height: 4)).fill() }
-            if let preview { color.withAlphaComponent(0.35).setFill(); NSBezierPath(rect: NSRect(x: preview == .left ? 0 : 36, y: 0, width: 4, height: 40)).fill() }
-            if warning != nil { NSColor.systemOrange.setFill(); NSBezierPath(ovalIn: NSRect(x: 2, y: 34, width: 4, height: 4)).fill() }
+            NSBezierPath(ovalIn: NSRect(x: 2, y: 2, width: 44, height: 44)).fill()
+            drawRing(center: CGPoint(x: 24, y: 24), radius: 20.5, lineWidth: 3, percentage: displayedFiveHour, window: state.fiveHour, now: now)
+            drawRing(center: CGPoint(x: 24, y: 24), radius: 15.5, lineWidth: 2.5, percentage: displayedSevenDay, window: state.sevenDay, now: now)
+            let value = state.fiveHour.visiblePercentage(at: now).map { "\($0)%" } ?? "--"
+            drawCentered(value, y: 20, font: .monospacedDigitSystemFont(ofSize: 10.5, weight: .bold), color: .labelColor)
+            drawCentered("5H", y: 11, font: .systemFont(ofSize: 6.5, weight: .medium), color: .secondaryLabelColor)
+            if let preview { nsColor(state.fiveHour.color(at: now)).withAlphaComponent(0.35).setFill(); NSBezierPath(rect: NSRect(x: preview == .left ? 0 : 44, y: 0, width: 4, height: 48)).fill() }
+            if warning != nil { NSColor.systemOrange.setFill(); NSBezierPath(ovalIn: NSRect(x: 3, y: 41, width: 4, height: 4)).fill() }
             NSGraphicsContext.restoreGraphicsState()
         case .rail(let dockSide):
-            let railX: CGFloat = dockSide == .left ? 0 : 15
-            NSColor.quaternaryLabelColor.setFill(); NSBezierPath(roundedRect: NSRect(x: railX, y: 5, width: 8, height: 50), xRadius: 4, yRadius: 4).fill()
-            let fraction = CGFloat(state.visiblePercentage(at: Date()) ?? 0) / 100
-            color.setFill(); NSBezierPath(roundedRect: NSRect(x: railX, y: 5, width: 8, height: 50 * fraction), xRadius: 4, yRadius: 4).fill()
-            let indicatorX: CGFloat = dockSide == .left ? 10 : 9
-            if state.isStale(at: Date()) { NSColor.systemOrange.setFill(); NSBezierPath(ovalIn: NSRect(x: indicatorX, y: 52, width: 4, height: 4)).fill() }
-            if warning != nil { NSColor.systemOrange.setFill(); NSBezierPath(ovalIn: NSRect(x: indicatorX, y: 4, width: 4, height: 4)).fill() }
+            let edgeX: CGFloat = dockSide == .left ? 0 : 21
+            let contentX: CGFloat = dockSide == .left ? 4 : 14
+            drawRail(x: edgeX, width: 3, percentage: displayedSevenDay, window: state.sevenDay, now: now)
+            drawRail(x: contentX, width: 6, percentage: displayedFiveHour, window: state.fiveHour, now: now)
+            let indicatorX: CGFloat = dockSide == .left ? 12 : 8
+            if state.fiveHour.isStale(at: now) || state.sevenDay.isStale(at: now) { NSColor.systemOrange.setFill(); NSBezierPath(ovalIn: NSRect(x: indicatorX, y: 57, width: 4, height: 4)).fill() }
+            if warning != nil { NSColor.systemOrange.setFill(); NSBezierPath(ovalIn: NSRect(x: indicatorX, y: 3, width: 4, height: 4)).fill() }
         }
+    }
+
+    private func drawRing(center: CGPoint, radius: CGFloat, lineWidth: CGFloat, percentage: CGFloat?, window: UsageWindowState, now: Date) {
+        let track = NSBezierPath()
+        track.appendArc(withCenter: center, radius: radius, startAngle: 0, endAngle: 360)
+        track.lineWidth = lineWidth
+        NSColor.quaternaryLabelColor.setStroke()
+        track.stroke()
+        guard let percentage else { return }
+        let progress = NSBezierPath()
+        progress.appendArc(withCenter: center, radius: radius, startAngle: 90, endAngle: 90 - 360 * percentage / 100, clockwise: true)
+        progress.lineWidth = lineWidth
+        progress.lineCapStyle = .round
+        nsColor(window.color(at: now)).withAlphaComponent(window.isStale(at: now) ? 0.55 : 1).setStroke()
+        progress.stroke()
+    }
+
+    private func drawRail(x: CGFloat, width: CGFloat, percentage: CGFloat?, window: UsageWindowState, now: Date) {
+        let trackBounds = NSRect(x: x, y: 5, width: width, height: 54)
+        NSColor.quaternaryLabelColor.setFill()
+        NSBezierPath(roundedRect: trackBounds, xRadius: width / 2, yRadius: width / 2).fill()
+        guard let percentage else { return }
+        let fillHeight = 54 * min(100, max(0, percentage)) / 100
+        nsColor(window.color(at: now)).withAlphaComponent(window.isStale(at: now) ? 0.55 : 1).setFill()
+        NSBezierPath(roundedRect: NSRect(x: x, y: 5, width: width, height: fillHeight), xRadius: width / 2, yRadius: width / 2).fill()
+    }
+
+    private func animateProgress(fromFiveHour: CGFloat?, toFiveHour: CGFloat?, fromSevenDay: CGFloat?, toSevenDay: CGFloat?) {
+        progressTimer?.invalidate()
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+              fromFiveHour != toFiveHour || fromSevenDay != toSevenDay
+        else {
+            displayedFiveHour = toFiveHour
+            displayedSevenDay = toSevenDay
+            needsDisplay = true
+            return
+        }
+        let startedAt = CACurrentMediaTime()
+        progressTimer = Timer.scheduledTimer(withTimeInterval: 1 / 60, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            let linear = min(1, (CACurrentMediaTime() - startedAt) / 0.18)
+            let eased = 1 - pow(1 - linear, 3)
+            displayedFiveHour = Self.interpolate(fromFiveHour, toFiveHour, CGFloat(eased))
+            displayedSevenDay = Self.interpolate(fromSevenDay, toSevenDay, CGFloat(eased))
+            needsDisplay = true
+            if linear >= 1 { timer.invalidate(); progressTimer = nil }
+        }
+    }
+
+    private static func interpolate(_ from: CGFloat?, _ to: CGFloat?, _ progress: CGFloat) -> CGFloat? {
+        guard let to else { return nil }
+        let start = from ?? 0
+        return start + (to - start) * progress
+    }
+
+    private func updateAccessibilityAndTooltip(now: Date) {
+        let five = state.fiveHour.visiblePercentageExact(at: now).map { String(format: "%.1f%%", $0) } ?? "不可用"
+        let seven = state.sevenDay.visiblePercentageExact(at: now).map { String(format: "%.1f%%", $0) } ?? "不可用"
+        let text = "Codex 5H \(five)，7D \(seven)"
+        setAccessibilityLabel(text)
+        toolTip = text
     }
     private static func accessibilityHelp(for visual: PanelVisual) -> String {
         switch visual {

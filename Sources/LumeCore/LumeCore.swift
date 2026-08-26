@@ -62,10 +62,10 @@ private extension CGRect {
 }
 
 public struct PanelGeometry: Equatable, Sendable {
-    public static let ringHitSize = CGSize(width: 40, height: 40)
-    public static let ringVisibleDiameter: CGFloat = 36
-    public static let railHitSize = CGSize(width: 23, height: 60)
-    public static let railVisibleSize = CGSize(width: 8, height: 50)
+    public static let ringHitSize = CGSize(width: 48, height: 48)
+    public static let ringVisibleDiameter: CGFloat = 44
+    public static let railHitSize = CGSize(width: 24, height: 64)
+    public static let railVisibleSize = CGSize(width: 10, height: 54)
     public static let clickDistance: CGFloat = 3
     public static let dockPreviewDistance: CGFloat = 24
     public static let dockCommitDistance: CGFloat = 16
@@ -168,20 +168,45 @@ public enum PanelTransition: Equatable, Sendable {
 public enum UsageReadStatus: String, Codable, Sendable { case success, executableNotFound, timedOut, cancelled, invalidJSON, protocolError, processExited, failed, throttled }
 public enum UsageFailureCode: String, Codable, Sendable { case none, executableNotFound, timeout, cancelled, invalidJSON, frameTooLarge, serverError, resultMissing, initializeResultMissing, processExited, processStartFailed, processIO }
 
+public struct UsageWindowSnapshot: Sendable, Equatable {
+    public let remainingPercentageExact: Double
+    public let resetsAt: Date?
+    public var remainingPercentage: Int { Int(remainingPercentageExact.rounded()) }
+
+    public init(remainingPercentageExact: Double, resetsAt: Date?) {
+        self.remainingPercentageExact = min(100, max(0, remainingPercentageExact))
+        self.resetsAt = resetsAt
+    }
+}
+
 public struct UsageReadResult: Sendable, Equatable {
     public let status: UsageReadStatus
-    public let remainingPercentage: Int?
-    public let remainingPercentageExact: Double?
-    public let resetsAt: Date?
+    public let fiveHour: UsageWindowSnapshot?
+    public let sevenDay: UsageWindowSnapshot?
     public let observedAt: Date
     public let failureCode: UsageFailureCode
     public let duration: TimeInterval
 
+    // Compatibility accessors keep integrations built against Lume 1.1 reading 7D.
+    public var remainingPercentage: Int? { sevenDay?.remainingPercentage }
+    public var remainingPercentageExact: Double? { sevenDay?.remainingPercentageExact }
+    public var resetsAt: Date? { sevenDay?.resetsAt }
+
+    public init(status: UsageReadStatus, fiveHour: UsageWindowSnapshot?, sevenDay: UsageWindowSnapshot?, observedAt: Date, failureCode: UsageFailureCode = .none, duration: TimeInterval = 0) {
+        self.status = status
+        self.fiveHour = fiveHour
+        self.sevenDay = sevenDay
+        self.observedAt = observedAt
+        self.failureCode = failureCode
+        self.duration = duration
+    }
+
     public init(status: UsageReadStatus, remainingPercentage: Int?, remainingPercentageExact: Double? = nil, resetsAt: Date? = nil, observedAt: Date, failureCode: UsageFailureCode = .none, duration: TimeInterval = 0) {
         self.status = status
-        self.remainingPercentage = remainingPercentage
-        self.remainingPercentageExact = remainingPercentageExact ?? remainingPercentage.map(Double.init)
-        self.resetsAt = resetsAt
+        fiveHour = nil
+        sevenDay = (remainingPercentageExact ?? remainingPercentage.map(Double.init)).map {
+            UsageWindowSnapshot(remainingPercentageExact: $0, resetsAt: resetsAt)
+        }
         self.observedAt = observedAt
         self.failureCode = failureCode
         self.duration = duration
@@ -190,37 +215,98 @@ public struct UsageReadResult: Sendable, Equatable {
 
 public protocol UsageReader: Sendable { func read() async -> UsageReadResult }
 
-public struct LumeState: Codable, Equatable, Sendable {
-    public static let staleAfter: TimeInterval = 15 * 60
-    public var remainingPercentage: Int?
+public struct UsageWindowState: Codable, Equatable, Sendable {
+    public var remainingPercentageExact: Double?
+    public var resetsAt: Date?
     public var lastSuccessfulAt: Date?
     public var lastStatus: UsageReadStatus
-    public var presentation: LumePresentation
 
-    public static func empty(now: Date) -> LumeState { LumeState(remainingPercentage: nil, lastSuccessfulAt: nil, lastStatus: .failed, presentation: .ring) }
-
-    public init(remainingPercentage: Int?, lastSuccessfulAt: Date?, lastStatus: UsageReadStatus, presentation: LumePresentation = .ring) {
-        self.remainingPercentage = remainingPercentage
+    public init(remainingPercentageExact: Double? = nil, resetsAt: Date? = nil, lastSuccessfulAt: Date? = nil, lastStatus: UsageReadStatus = .failed) {
+        self.remainingPercentageExact = remainingPercentageExact
+        self.resetsAt = resetsAt
         self.lastSuccessfulAt = lastSuccessfulAt
         self.lastStatus = lastStatus
-        self.presentation = presentation
     }
 
+    public var remainingPercentage: Int? { remainingPercentageExact.map { Int($0.rounded()) } }
     public var displayValue: String { remainingPercentage.map(String.init) ?? "--" }
     public func presentationState(at now: Date) -> UsagePresentationState {
-        guard let remainingPercentage, let lastSuccessfulAt, now.timeIntervalSince(lastSuccessfulAt) <= Self.staleAfter else { return .unavailable }
+        guard let remainingPercentage, let lastSuccessfulAt, now.timeIntervalSince(lastSuccessfulAt) <= LumeState.staleAfter else { return .unavailable }
         return lastStatus == .success ? .fresh(remainingPercentage) : .stale(remainingPercentage)
     }
     public func isStale(at now: Date) -> Bool { if case .stale = presentationState(at: now) { return true }; return false }
     public func visiblePercentage(at now: Date) -> Int? { switch presentationState(at: now) { case .fresh(let value), .stale(let value): return value; case .unavailable: return nil } }
+    public func visiblePercentageExact(at now: Date) -> Double? { visiblePercentage(at: now) == nil ? nil : remainingPercentageExact }
     public func color(at now: Date) -> LumeColor { LumeColor.forRemaining(visiblePercentage(at: now)) }
 
-    public mutating func apply(_ result: UsageReadResult) {
-        lastStatus = result.status
-        if result.status == .success, let percentage = result.remainingPercentage {
-            remainingPercentage = min(100, max(0, percentage))
-            lastSuccessfulAt = result.observedAt
+    mutating func apply(_ snapshot: UsageWindowSnapshot?, status: UsageReadStatus, observedAt: Date) {
+        lastStatus = snapshot == nil && status == .success ? .protocolError : status
+        guard status == .success, let snapshot else { return }
+        remainingPercentageExact = snapshot.remainingPercentageExact
+        resetsAt = snapshot.resetsAt
+        lastSuccessfulAt = observedAt
+    }
+}
+
+public struct LumeState: Codable, Equatable, Sendable {
+    public static let staleAfter: TimeInterval = 15 * 60
+    public var fiveHour: UsageWindowState
+    public var sevenDay: UsageWindowState
+    public var presentation: LumePresentation
+
+    public static func empty(now _: Date) -> LumeState { LumeState(fiveHour: UsageWindowState(), sevenDay: UsageWindowState(), presentation: .ring) }
+
+    public init(fiveHour: UsageWindowState, sevenDay: UsageWindowState, presentation: LumePresentation = .ring) {
+        self.fiveHour = fiveHour
+        self.sevenDay = sevenDay
+        self.presentation = presentation
+    }
+
+    public init(remainingPercentage: Int?, lastSuccessfulAt: Date?, lastStatus: UsageReadStatus, presentation: LumePresentation = .ring) {
+        fiveHour = UsageWindowState()
+        sevenDay = UsageWindowState(remainingPercentageExact: remainingPercentage.map(Double.init), lastSuccessfulAt: lastSuccessfulAt, lastStatus: lastStatus)
+        self.presentation = presentation
+    }
+
+    // Compatibility accessors represent the historical 7D surface.
+    public var remainingPercentage: Int? { sevenDay.remainingPercentage }
+    public var lastSuccessfulAt: Date? { [fiveHour.lastSuccessfulAt, sevenDay.lastSuccessfulAt].compactMap { $0 }.max() }
+    public var lastStatus: UsageReadStatus { sevenDay.lastStatus }
+    public var displayValue: String { sevenDay.displayValue }
+    public func presentationState(at now: Date) -> UsagePresentationState { sevenDay.presentationState(at: now) }
+    public func isStale(at now: Date) -> Bool { sevenDay.isStale(at: now) }
+    public func visiblePercentage(at now: Date) -> Int? { sevenDay.visiblePercentage(at: now) }
+    public func color(at now: Date) -> LumeColor { sevenDay.color(at: now) }
+
+    private enum CodingKeys: String, CodingKey {
+        case fiveHour, sevenDay, presentation
+        case remainingPercentage, lastSuccessfulAt, lastStatus
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        presentation = try values.decodeIfPresent(LumePresentation.self, forKey: .presentation) ?? .ring
+        fiveHour = try values.decodeIfPresent(UsageWindowState.self, forKey: .fiveHour) ?? UsageWindowState()
+        if let current = try values.decodeIfPresent(UsageWindowState.self, forKey: .sevenDay) {
+            sevenDay = current
+        } else {
+            let remaining = try values.decodeIfPresent(Int.self, forKey: .remainingPercentage)
+            let successfulAt = try values.decodeIfPresent(Date.self, forKey: .lastSuccessfulAt)
+            let status = try values.decodeIfPresent(UsageReadStatus.self, forKey: .lastStatus) ?? .failed
+            sevenDay = UsageWindowState(remainingPercentageExact: remaining.map(Double.init), lastSuccessfulAt: successfulAt, lastStatus: status)
         }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(fiveHour, forKey: .fiveHour)
+        try values.encode(sevenDay, forKey: .sevenDay)
+        try values.encode(presentation, forKey: .presentation)
+    }
+
+    public mutating func apply(_ result: UsageReadResult) {
+        fiveHour.apply(result.fiveHour, status: result.status, observedAt: result.observedAt)
+        sevenDay.apply(result.sevenDay, status: result.status, observedAt: result.observedAt)
     }
 }
 
@@ -260,7 +346,6 @@ public struct LumeMenuItem: Equatable, Sendable { public let title: String; publ
 public struct LumeMenuPresentation: Sendable {
     public let items: [LumeMenuItem]
     public init(state: LumeState, panelVisible: Bool, refreshStatus: UsageReadStatus, launchAtLogin _: Bool, lastUpdateAt: Date? = nil, now: Date) {
-        let usage = state.visiblePercentage(at: now).map { "\($0)%" } ?? "--"
         let status: String
         switch refreshStatus {
         case .success: status = lastUpdateAt.map { "更新于 \(Self.relativeAge(now.timeIntervalSince($0)))" } ?? "额度已更新"
@@ -269,7 +354,28 @@ public struct LumeMenuPresentation: Sendable {
         case .timedOut: status = "额度读取超时"
         default: status = "额度暂不可用"
         }
-        items = [LumeMenuItem("7D 额度：\(usage)"), LumeMenuItem(status), LumeMenuItem("打开 Codex"), LumeMenuItem(panelVisible ? "隐藏额度浮窗" : "显示额度浮窗"), LumeMenuItem("刷新额度"), LumeMenuItem("登录时启动"), LumeMenuItem("Sol Control"), LumeMenuItem("关于 Lume"), LumeMenuItem("退出 Lume")]
+        items = [
+            LumeMenuItem(Self.usageTitle(label: "5H", window: state.fiveHour, now: now)),
+            LumeMenuItem(Self.usageTitle(label: "7D", window: state.sevenDay, now: now)),
+            LumeMenuItem(status),
+            LumeMenuItem("打开 Codex"),
+            LumeMenuItem(panelVisible ? "隐藏额度浮窗" : "显示额度浮窗"),
+            LumeMenuItem("刷新额度"),
+            LumeMenuItem("登录时启动"),
+            LumeMenuItem("Sol Control"),
+            LumeMenuItem("关于 Lume"),
+            LumeMenuItem("退出 Lume"),
+        ]
+    }
+
+    private static func usageTitle(label: String, window: UsageWindowState, now: Date) -> String {
+        guard let exact = window.visiblePercentageExact(at: now) else { return "\(label) 额度：--" }
+        let percentage = exact.rounded() == exact ? String(Int(exact)) : String(format: "%.1f", exact)
+        guard let reset = window.resetsAt else { return "\(label) 额度：\(percentage)%" }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.dateFormat = "HH:mm"
+        return "\(label) 额度：\(percentage)% · 重置于 \(formatter.string(from: reset))"
     }
 
     private static func relativeAge(_ interval: TimeInterval) -> String {
@@ -347,12 +453,12 @@ public struct CodexAppServerUsageReader: UsageReader {
             try await transport.send("{\"id\":2,\"method\":\"account/rateLimits/read\",\"params\":null}")
             let usage = try await response(id: 2, from: transport, deadline: deadline)
             guard case .message(let usageMessage) = usage else { return failure(for: usage, initialize: false, started: started) }
-            guard let window = normalizeLongWindow(usageMessage) else { return failed(.protocolError, .resultMissing, started) }
+            let windows = normalizeWindows(usageMessage)
+            guard windows.fiveHour != nil || windows.sevenDay != nil else { return failed(.protocolError, .resultMissing, started) }
             return UsageReadResult(
                 status: .success,
-                remainingPercentage: Int(window.remaining.rounded()),
-                remainingPercentageExact: window.remaining,
-                resetsAt: window.resetsAt,
+                fiveHour: windows.fiveHour,
+                sevenDay: windows.sevenDay,
                 observedAt: started,
                 duration: now().timeIntervalSince(started))
         } catch is UsageReaderTimeout { return failed(.timedOut, .timeout, started) }
@@ -413,8 +519,8 @@ public struct CodexAppServerUsageReader: UsageReader {
         return ["codexHome", "platformFamily", "platformOs", "userAgent"].allSatisfy { (result[$0] as? String)?.isEmpty == false }
     }
 
-    private func normalizeLongWindow(_ value: Any) -> (remaining: Double, resetsAt: Date?)? {
-        guard let response = value as? [String: Any], let result = response["result"] as? [String: Any] else { return nil }
+    private func normalizeWindows(_ value: Any) -> (fiveHour: UsageWindowSnapshot?, sevenDay: UsageWindowSnapshot?) {
+        guard let response = value as? [String: Any], let result = response["result"] as? [String: Any] else { return (nil, nil) }
         var candidates = [[String: Any]]()
         if let direct = result["rateLimits"] as? [String: Any] { candidates.append(direct) }
         if let buckets = result["rateLimitsByLimitId"] as? [String: Any] {
@@ -438,8 +544,12 @@ public struct CodexAppServerUsageReader: UsageReader {
             }
             return (duration, 100 - used, reset)
         } }
-        guard let sevenDay = windows.first(where: { $0.duration == 10_080 }) else { return nil }
-        return (min(100, max(0, sevenDay.remaining)), sevenDay.resetsAt)
+        func snapshot(duration: Int) -> UsageWindowSnapshot? {
+            windows.first(where: { $0.duration == duration }).map {
+                UsageWindowSnapshot(remainingPercentageExact: $0.remaining, resetsAt: $0.resetsAt)
+            }
+        }
+        return (snapshot(duration: 300), snapshot(duration: 10_080))
     }
     private func finiteNumber(_ value: Any?) -> Double? {
         guard let number = value as? NSNumber else { return nil }
@@ -584,15 +694,29 @@ public struct DiscoveredCodexUsageReader: UsageReader {
 }
 
 public final class LumePreferencesStore: @unchecked Sendable {
-    private let defaults: UserDefaults; private let key = "Lume.preferences.v1"
+    private let defaults: UserDefaults
+    private let key = "Lume.preferences.v1"
+    private let geometryVersionKey = "Lume.panelGeometry.v2"
     public init(defaults: UserDefaults = .standard) { self.defaults = defaults }
     public func load(now: Date) -> LumePreferences {
-        guard let data = defaults.data(forKey: key), let preferences = try? JSONDecoder().decode(LumePreferences.self, from: data) else {
+        guard let data = defaults.data(forKey: key), var preferences = try? JSONDecoder().decode(LumePreferences.self, from: data) else {
             return LumePreferences(state: .empty(now: now))
+        }
+        if !defaults.bool(forKey: geometryVersionKey) {
+            if preferences.state.presentation == .ring {
+                preferences.panelOriginX -= 4
+                preferences.panelOriginY -= 4
+            } else {
+                preferences.panelOriginY -= 2
+            }
+            defaults.set(true, forKey: geometryVersionKey)
         }
         return preferences
     }
-    public func save(_ preferences: LumePreferences) { defaults.set(try? JSONEncoder().encode(preferences), forKey: key) }
+    public func save(_ preferences: LumePreferences) {
+        defaults.set(try? JSONEncoder().encode(preferences), forKey: key)
+        defaults.set(true, forKey: geometryVersionKey)
+    }
 }
 
 public enum SolControlConfiguredMode: String, Codable, CaseIterable, Sendable {

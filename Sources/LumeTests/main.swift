@@ -71,6 +71,8 @@ private actor BlockingTransport: AppServerTransport {
             exit(accepted && after == CodexHandoff.bundleIdentifier ? 0 : 1)
         }
         var failures = 0; let epoch = Date(timeIntervalSince1970: 0)
+        check(PanelGeometry.ringHitSize == CGSize(width: 48, height: 48) && PanelGeometry.ringVisibleDiameter == 44, "dual-ring geometry preserves a forty-four point visible circle inside a forty-eight point hit target", failures: &failures)
+        check(PanelGeometry.railHitSize == CGSize(width: 24, height: 64) && PanelGeometry.railVisibleSize == CGSize(width: 10, height: 54), "dual-rail geometry preserves the specified visible and hit sizes", failures: &failures)
         let fakeHome = URL(fileURLWithPath: "/Users/tester")
         let fakeResources = URL(fileURLWithPath: "/Applications/Codex.app/Contents/Resources")
         let executablePaths = Set([
@@ -89,12 +91,12 @@ private actor BlockingTransport: AppServerTransport {
         check(PanelGeometry.isClick(from: .zero, to: CGPoint(x: 2.99, y: 0)) && !PanelGeometry.isClick(from: .zero, to: CGPoint(x: 3, y: 0)), "three point movement distinguishes click from drag", failures: &failures)
         let screen = CGRect(x: 0, y: 0, width: 100, height: 100)
         check(PanelGeometry.draggedOrigin(from: CGPoint(x: 40, y: 50), pointerStart: .zero, pointerCurrent: CGPoint(x: 2.99, y: 0)) == nil && PanelGeometry.draggedOrigin(from: CGPoint(x: 40, y: 50), pointerStart: .zero, pointerCurrent: CGPoint(x: 3, y: 0)) == CGPoint(x: 43, y: 50), "sub-threshold clicks never move the ring", failures: &failures)
-        check(PanelGeometry.initialRingOrigin(in: CGRect(x: -800, y: 20, width: 800, height: 600)) == CGPoint(x: -420, y: 560), "first placement centers below the selected main screen top", failures: &failures)
+        check(PanelGeometry.initialRingOrigin(in: CGRect(x: -800, y: 20, width: 800, height: 600)) == CGPoint(x: -424, y: 552), "first placement centers below the selected main screen top", failures: &failures)
         let railScreen = CGRect(x: -800, y: 20, width: 800, height: 600)
         check(PanelGeometry.railOrigin(from: CGPoint(x: -800, y: 200), pointerStart: CGPoint(x: -790, y: 220), pointerCurrent: CGPoint(x: -790, y: 300), side: .left, in: railScreen) == CGPoint(x: -800, y: 280), "left rail drags vertically while remaining on its edge", failures: &failures)
-        check(PanelGeometry.railOrigin(from: CGPoint(x: -23, y: 590), pointerStart: CGPoint(x: -10, y: 600), pointerCurrent: CGPoint(x: -10, y: 700), side: .right, in: railScreen) == CGPoint(x: -23, y: 560), "right rail remains edge-pinned and clamps to the visible screen", failures: &failures)
-        check(PanelGeometry.expandedRingOrigin(from: CGRect(x: -23, y: 280, width: 23, height: 60), side: .right, in: railScreen) == CGPoint(x: -40, y: 290), "right rail expands leftward at its current vertical center", failures: &failures)
-        check(PanelGeometry.expandedRingOrigin(from: CGRect(x: -800, y: 280, width: 23, height: 60), side: .left, in: railScreen) == CGPoint(x: -800, y: 290), "left rail expands rightward at its current vertical center", failures: &failures)
+        check(PanelGeometry.railOrigin(from: CGPoint(x: -24, y: 590), pointerStart: CGPoint(x: -10, y: 600), pointerCurrent: CGPoint(x: -10, y: 700), side: .right, in: railScreen) == CGPoint(x: -24, y: 556), "right rail remains edge-pinned and clamps to the visible screen", failures: &failures)
+        check(PanelGeometry.expandedRingOrigin(from: CGRect(x: -24, y: 280, width: 24, height: 64), side: .right, in: railScreen) == CGPoint(x: -48, y: 288), "right rail expands leftward at its current vertical center", failures: &failures)
+        check(PanelGeometry.expandedRingOrigin(from: CGRect(x: -800, y: 280, width: 24, height: 64), side: .left, in: railScreen) == CGPoint(x: -800, y: 288), "left rail expands rightward at its current vertical center", failures: &failures)
         check(PanelVisual.resolved(presentation: .ring, dockSide: .right) == .ring, "ring presentation cannot retain a stale rail visual", failures: &failures)
         check(PanelVisual.resolved(presentation: .rail, dockSide: .left) == .rail(.left), "rail visual requires a matching dock side", failures: &failures)
         check(PanelTransition.ringRelease(start: .zero, end: CGPoint(x: 16, y: 40), screen: screen) == .dock(.left), "dock commits at sixteen points", failures: &failures)
@@ -131,7 +133,7 @@ private actor BlockingTransport: AppServerTransport {
         let initResponse = "{\"id\":1,\"result\":{\"codexHome\":\"/private\",\"platformFamily\":\"mac\",\"platformOs\":\"darwin\",\"userAgent\":\"Codex\"}}"
         let rateResponse = "{\"id\":2,\"result\":{\"rateLimits\":{\"primary\":{\"usedPercent\":70.0,\"windowDurationMins\":300},\"secondary\":{\"usedPercent\":80.1,\"windowDurationMins\":10080,\"resetsAt\":2000}}}}"
         let usage = await CodexAppServerUsageReader(factory: StubFactory(transport: StubTransport(lines: [initResponse, rateResponse])), now: { epoch }).read()
-        check(usage.status == .success && usage.remainingPercentage == 20 && abs((usage.remainingPercentageExact ?? 0) - 19.9) < 0.0001 && usage.resetsAt == Date(timeIntervalSince1970: 2000), "usage reader preserves unrounded seven day allowance and reset", failures: &failures)
+        check(usage.status == .success && usage.fiveHour?.remainingPercentage == 30 && usage.sevenDay?.remainingPercentage == 20 && abs((usage.sevenDay?.remainingPercentageExact ?? 0) - 19.9) < 0.0001 && usage.sevenDay?.resetsAt == Date(timeIntervalSince1970: 2000), "usage reader preserves independent five-hour and seven-day windows", failures: &failures)
         let invalidInitialize = await CodexAppServerUsageReader(factory: StubFactory(transport: StubTransport(lines: ["{\"id\":1,\"result\":{\"codexHome\":\"/private\"}}"])), now: { epoch }).read()
         check(invalidInitialize.status == .protocolError && invalidInitialize.failureCode == .initializeResultMissing, "usage reader rejects incomplete initialize result", failures: &failures)
         let serverError = await CodexAppServerUsageReader(factory: StubFactory(transport: StubTransport(lines: [initResponse, "{\"id\":2,\"error\":{\"code\":-1}}"])), now: { epoch }).read()
@@ -156,10 +158,12 @@ private actor BlockingTransport: AppServerTransport {
         let placement = PanelPlacement.ring(origin: CGPoint(x: 2000, y: 2000), displayIdentifier: "gone")
         let migrated = placement.migrated(to: [left, right])
         check(migrated.displayIdentifier == "right" && right.visibleFrame.contains(migrated.origin), "placement migrates and clamps after display topology changes", failures: &failures)
-        let menu = LumeMenuPresentation(state: LumeState(remainingPercentage: 8, lastSuccessfulAt: epoch, lastStatus: .success), panelVisible: false, refreshStatus: .throttled, launchAtLogin: false, now: epoch)
-        check(menu.items.map(\.title) == ["7D 额度：8%", "等待刷新", "打开 Codex", "显示额度浮窗", "刷新额度", "登录时启动", "Sol Control", "关于 Lume", "退出 Lume"], "menu labels are localized and keep Sol Control in a short parent item", failures: &failures)
+        var menuState = LumeState.empty(now: epoch)
+        menuState.apply(UsageReadResult(status: .success, fiveHour: UsageWindowSnapshot(remainingPercentageExact: 61.4, resetsAt: Date(timeIntervalSince1970: 1800)), sevenDay: UsageWindowSnapshot(remainingPercentageExact: 8.2, resetsAt: Date(timeIntervalSince1970: 7200)), observedAt: epoch))
+        let menu = LumeMenuPresentation(state: menuState, panelVisible: false, refreshStatus: .throttled, launchAtLogin: false, now: epoch)
+        check(menu.items.map(\.title) == ["5H 额度：61.4% · 重置于 08:30", "7D 额度：8.2% · 重置于 10:00", "等待刷新", "打开 Codex", "显示额度浮窗", "刷新额度", "登录时启动", "Sol Control", "关于 Lume", "退出 Lume"], "menu exposes exact dual-window allowances and reset times", failures: &failures)
         let agedMenu = LumeMenuPresentation(state: LumeState(remainingPercentage: 8, lastSuccessfulAt: epoch, lastStatus: .success), panelVisible: true, refreshStatus: .success, launchAtLogin: false, lastUpdateAt: epoch, now: epoch.addingTimeInterval(65))
-        check(agedMenu.items[1].title == "更新于 1 分钟前" && agedMenu.items[3].title == "隐藏额度浮窗", "localized menu reports update age and panel visibility", failures: &failures)
+        check(agedMenu.items[2].title == "更新于 1 分钟前" && agedMenu.items[4].title == "隐藏额度浮窗", "localized menu reports update age and panel visibility", failures: &failures)
         let numericShape = "{\"id\":2,\"result\":{\"rateLimitsByLimitId\":{\"other\":{\"primary\":{\"usedPercent\":90,\"windowDurationMins\":300},\"secondary\":{\"usedPercent\":25,\"windowDurationMins\":10080}}}}}"
         let normalized = await CodexAppServerUsageReader(factory: StubFactory(transport: StubTransport(lines: [initResponse, numericShape])), now: { epoch }).read()
         check(normalized.status == .success && normalized.remainingPercentage == 75, "reader accepts NSNumber rate-limit shapes and selects long window", failures: &failures)
@@ -183,10 +187,16 @@ private actor BlockingTransport: AppServerTransport {
         check(timedOut.status == .timedOut && blockingDidTerminate, "one total timeout returns without waiting for blocking receive and terminates transport", failures: &failures)
         let shortOnly = "{\"id\":2,\"result\":{\"rateLimits\":{\"primary\":{\"usedPercent\":10,\"windowDurationMins\":300}}}}"
         let shortOnlyUsage = await CodexAppServerUsageReader(factory: StubFactory(transport: StubTransport(lines: [initResponse, shortOnly])), now: { epoch }).read()
-        check(shortOnlyUsage.status == .protocolError && shortOnlyUsage.remainingPercentage == nil, "reader never mislabels a short-only window as 7D", failures: &failures)
+        check(shortOnlyUsage.status == .success && shortOnlyUsage.fiveHour?.remainingPercentage == 90 && shortOnlyUsage.sevenDay == nil, "reader accepts an independently available five-hour window", failures: &failures)
         let longerWindow = "{\"id\":2,\"result\":{\"rateLimits\":{\"secondary\":{\"usedPercent\":10,\"windowDurationMins\":43200}}}}"
         let longerWindowUsage = await CodexAppServerUsageReader(factory: StubFactory(transport: StubTransport(lines: [initResponse, longerWindow])), now: { epoch }).read()
         check(longerWindowUsage.status == .protocolError && longerWindowUsage.remainingPercentage == nil, "reader never labels a non-seven-day long window as 7D", failures: &failures)
+        var independentState = LumeState.empty(now: epoch)
+        independentState.apply(UsageReadResult(status: .success, fiveHour: UsageWindowSnapshot(remainingPercentageExact: 42, resetsAt: nil), sevenDay: nil, observedAt: epoch))
+        check(independentState.fiveHour.presentationState(at: epoch) == .fresh(42) && independentState.sevenDay.presentationState(at: epoch) == .unavailable, "quota windows retain independent availability", failures: &failures)
+        let legacy = "{\"remainingPercentage\":73,\"lastSuccessfulAt\":0,\"lastStatus\":\"success\",\"presentation\":\"rail\"}"
+        let migratedLegacy = try? JSONDecoder().decode(LumeState.self, from: Data(legacy.utf8))
+        check(migratedLegacy?.sevenDay.remainingPercentage == 73 && migratedLegacy?.fiveHour.remainingPercentage == nil && migratedLegacy?.presentation == .rail, "legacy single-window state migrates into the seven-day window", failures: &failures)
         var invalidUTF8 = AppServerFrameBuffer()
         try? invalidUTF8.append(Data([0xFF, 0x0A]))
         let invalidUTF8Result = Result { try invalidUTF8.nextLine() }
