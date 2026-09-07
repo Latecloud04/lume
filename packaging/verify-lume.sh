@@ -154,28 +154,13 @@ verify_app() {
 
   while IFS= read -r -d '' path; do
     case "$(basename "$path")" in
-      Lume.icns|SolControlIntegration)
+      Lume.icns)
         ;;
       *)
         die "unexpected Resources sidecar: ${path#"$app"/}"
         ;;
     esac
   done < <(find "$resources" -mindepth 1 -maxdepth 1 -print0)
-
-  [[ -d "$resources/SolControlIntegration" ]] || die "Sol Control integration resources are missing"
-  while IFS= read -r -d '' path; do
-    case "$(basename "$path")" in
-      lume_policy.py|sol-control-mode.md|install.sh)
-        ;;
-      *)
-        die "unexpected Sol Control integration sidecar: ${path#"$app"/}"
-        ;;
-    esac
-  done < <(find "$resources/SolControlIntegration" -mindepth 1 -maxdepth 1 -print0)
-  for integration_file in lume_policy.py sol-control-mode.md install.sh; do
-    [[ -f "$resources/SolControlIntegration/$integration_file" ]] \
-      || die "missing Sol Control integration resource: $integration_file"
-  done
 
   if [[ -e "$content/_CodeSignature" ]]; then
     [[ -d "$content/_CodeSignature" ]] || die "_CodeSignature must be a directory"

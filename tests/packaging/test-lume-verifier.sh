@@ -20,7 +20,7 @@ assert_fail() {
 
 create_fixture() {
   local app="$1"
-  mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/SolControlIntegration"
+  mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
   python3 - "$app/Contents/Info.plist" <<'PY'
 import plistlib
 import sys
@@ -34,8 +34,8 @@ with open(sys.argv[1], "wb") as stream:
             "CFBundleIdentifier": "local.lume.codex",
             "CFBundleName": "Lume",
             "CFBundlePackageType": "APPL",
-            "CFBundleShortVersionString": "1.2.0",
-            "CFBundleVersion": "1.2.0",
+            "CFBundleShortVersionString": "1.3.0",
+            "CFBundleVersion": "1.3.0",
             "LSMinimumSystemVersion": "14.0",
             "LSUIElement": True,
         },
@@ -44,12 +44,7 @@ with open(sys.argv[1], "wb") as stream:
 PY
   printf '#!/bin/sh\nexit 0\n' >"$app/Contents/MacOS/Lume"
   printf 'fixture icns\n' >"$app/Contents/Resources/Lume.icns"
-  printf '#!/usr/bin/python3\n' >"$app/Contents/Resources/SolControlIntegration/lume_policy.py"
-  printf 'mode contract\n' >"$app/Contents/Resources/SolControlIntegration/sol-control-mode.md"
-  printf '#!/bin/bash\n' >"$app/Contents/Resources/SolControlIntegration/install.sh"
   chmod +x "$app/Contents/MacOS/Lume"
-  chmod +x "$app/Contents/Resources/SolControlIntegration/lume_policy.py" \
-    "$app/Contents/Resources/SolControlIntegration/install.sh"
 }
 
 copy_valid() {
@@ -162,14 +157,6 @@ copy_valid resource-sidecar
 printf 'sidecar\n' >"$TMP_ROOT/resource-sidecar/Lume.app/Contents/Resources/sidecar"
 assert_fail "$VERIFIER" --app "$TMP_ROOT/resource-sidecar/Lume.app" --allow-unsigned --allow-non-arm64
 
-copy_valid integration-sidecar
-printf 'sidecar\n' >"$TMP_ROOT/integration-sidecar/Lume.app/Contents/Resources/SolControlIntegration/sidecar"
-assert_fail "$VERIFIER" --app "$TMP_ROOT/integration-sidecar/Lume.app" --allow-unsigned --allow-non-arm64
-
-copy_valid missing-integration-helper
-rm "$TMP_ROOT/missing-integration-helper/Lume.app/Contents/Resources/SolControlIntegration/lume_policy.py"
-assert_fail "$VERIFIER" --app "$TMP_ROOT/missing-integration-helper/Lume.app" --allow-unsigned --allow-non-arm64
-
 copy_valid contents-sidecar
 printf 'sidecar\n' >"$TMP_ROOT/contents-sidecar/Lume.app/Contents/PkgInfo"
 assert_fail "$VERIFIER" --app "$TMP_ROOT/contents-sidecar/Lume.app" --allow-unsigned --allow-non-arm64
@@ -249,8 +236,6 @@ rg -q 'PACKAGE_ROOT="\$ROOT"|\.build/release/Lume|artifacts/lume|Lume\.app|Lume\
   || fail "build script does not prove frozen Lume paths"
 rg -q 'LumeIcon\.swift|LumeIcon\.svg|iconutil|Lume\.icns' "$BUILD_SCRIPT" \
   || fail "build script does not prove deterministic icon generation"
-rg -q 'SolControlIntegration|lume_policy\.py|sol-control-mode\.md|install\.sh' "$BUILD_SCRIPT" \
-  || fail "build script does not package the frozen Sol Control integration"
 rg -q 'STAGING=\$\(mktemp -d|COMMIT_STARTED=1|APP_STAGE|DMG_STAGE' "$BUILD_SCRIPT" \
   || fail "build script is missing stage-first atomic output checks"
 if rg -qi 'Tessalume|Helpers|themes|\.dll|\.exe|dotnet' "$BUILD_SCRIPT"; then
@@ -273,7 +258,7 @@ import sys
 with open(sys.argv[1], encoding="utf-8") as stream:
     config = json.load(stream)
 expected = {
-    "appVersion": "1.2.0",
+    "appVersion": "1.3.0",
     "bundleIdentifier": "local.lume.codex",
     "displayName": "Lume",
     "bundleName": "Lume",

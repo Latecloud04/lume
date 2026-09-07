@@ -8,7 +8,6 @@ PACKAGE_MANIFEST="$PACKAGE_ROOT/Package.swift"
 SWIFT_RELEASE_OUTPUT="$PACKAGE_ROOT/.build/release/Lume"
 ICON_SOURCE="$ROOT/packaging/lume-assets/LumeIcon.swift"
 ICON_SVG_SOURCE="$ROOT/packaging/lume-assets/LumeIcon.svg"
-INTEGRATION_SOURCE="$ROOT/integrations/sol-control"
 OUTPUT_ARG="$ROOT/artifacts/lume"
 IDENTITY="${CODESIGN_IDENTITY:--}"
 VERSION="${LUME_VERSION:-}"
@@ -144,10 +143,6 @@ fi
 [[ -f "$PACKAGE_MANIFEST" ]] || die "Lume Swift package is missing: $PACKAGE_MANIFEST"
 [[ -f "$ICON_SOURCE" ]] || die "Lume icon drawing source is missing: $ICON_SOURCE"
 [[ -f "$ICON_SVG_SOURCE" ]] || die "Lume icon SVG source is missing: $ICON_SVG_SOURCE"
-for integration_file in lume_policy.py sol-control-mode.md install.sh; do
-  [[ -f "$INTEGRATION_SOURCE/$integration_file" ]] \
-    || die "Lume Sol Control integration resource is missing: $INTEGRATION_SOURCE/$integration_file"
-done
 
 CONFIG_VALUES=$(python3 - "$CONFIG_PATH" <<'PY'
 import json
@@ -243,13 +238,6 @@ mkdir -p "$ICONSET_STAGE"
 "$SWIFT_BIN" "$ICON_SOURCE" "$ICONSET_STAGE"
 "$ICONUTIL_BIN" -c icns "$ICONSET_STAGE" -o "$RESOURCES_STAGE/Lume.icns"
 [[ -s "$RESOURCES_STAGE/Lume.icns" ]] || die "generated Lume.icns is missing or empty"
-mkdir -p "$RESOURCES_STAGE/SolControlIntegration"
-for integration_file in lume_policy.py sol-control-mode.md install.sh; do
-  cp "$INTEGRATION_SOURCE/$integration_file" "$RESOURCES_STAGE/SolControlIntegration/$integration_file"
-done
-chmod 0755 "$RESOURCES_STAGE/SolControlIntegration/lume_policy.py" \
-  "$RESOURCES_STAGE/SolControlIntegration/install.sh"
-chmod 0644 "$RESOURCES_STAGE/SolControlIntegration/sol-control-mode.md"
 
 python3 - "$CONTENT_STAGE/Info.plist" "$VERSION" "$BUNDLE_IDENTIFIER" "$DISPLAY_NAME" \
   "$BUNDLE_NAME" "$EXECUTABLE" "$MINIMUM_MACOS" <<'PY'

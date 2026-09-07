@@ -1,6 +1,6 @@
 # Use user-selected Sol Control modes
 
-Status: Accepted.
+Status: Superseded for Lume by [ADR 0009](0009-trustworthy-quota-companion.md). Existing standalone Sol Control policy remains owned by Sol Control.
 
 ## Decision
 

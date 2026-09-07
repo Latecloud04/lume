@@ -13,7 +13,7 @@ struct LumeMain {
 }
 
 @MainActor
-final class LumeAppDelegate: NSObject, NSApplicationDelegate {
+final class LumeAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem?
     private var panel: NSPanel?
     private var state = LumeState.empty(now: Date())
@@ -22,13 +22,11 @@ final class LumeAppDelegate: NSObject, NSApplicationDelegate {
     private var coordinator: UsageRefreshCoordinator?
     private let launchAtLogin = SystemLaunchAtLoginProvider()
     private var refreshTimer: Timer?
-    private var warningTimer: Timer?
-    private var refreshStatus: UsageReadStatus = .failed
+    private var presentationTimer: Timer?
+    private var refreshing = false
+    private weak var openMenu: NSMenu?
+    private var lastCodexActiveAt = Date()
     private var warning: String?
-    private var lastUpdateAt: Date?
-    private var solControlBridge: SolControlBridge?
-    private var solControlDoctor: SolControlDoctor?
-    private var solControlResolution: SolControlResolution?
 
     func applicationDidFinishLaunching(_: Notification) {
         preferences = preferencesStore.load(now: Date())
@@ -39,18 +37,16 @@ final class LumeAppDelegate: NSObject, NSApplicationDelegate {
         } else if state.presentation == .ring {
             preferences.dockSide = nil
         }
-        refreshStatus = state.lastStatus
-        lastUpdateAt = state.lastSuccessfulAt
-        solControlBridge = SolControlBridge.bundled(resourceURL: Bundle.main.resourceURL)
         coordinator = UsageRefreshCoordinator(reader: DiscoveredCodexUsageReader())
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         item.button?.image = Self.templateImage
         item.menu = makeMenu()
         statusItem = item
         if preferences.isPanelVisible { showPanel() }
-        refreshSolControlStatus()
         refresh(reason: .launch)
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in Task { @MainActor in self?.refresh(reason: .timer) } }
+        for name in [NSWorkspace.didActivateApplicationNotification, NSWorkspace.didTerminateApplicationNotification] {
+            NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(applicationActivityChanged), name: name, object: nil)
+        }
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(systemDidWake), name: NSWorkspace.didWakeNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(screenParametersDidChange), name: NSApplication.didChangeScreenParametersNotification, object: nil)
         DistributedNotificationCenter.default().addObserver(self, selector: #selector(systemDidWake), name: Notification.Name("com.apple.screenIsUnlocked"), object: nil)
@@ -58,7 +54,7 @@ final class LumeAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_: Notification) {
         refreshTimer?.invalidate()
-        warningTimer?.invalidate()
+        presentationTimer?.invalidate()
         NotificationCenter.default.removeObserver(self)
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         DistributedNotificationCenter.default().removeObserver(self)
@@ -77,7 +73,8 @@ final class LumeAppDelegate: NSObject, NSApplicationDelegate {
         Task { [weak self] in
             guard let self else { return }
             let result = await CodexHandoff().perform()
-            if result == .unavailable || result == .failed { showWarning("Codex unavailable") }
+            if result == .unavailable || result == .failed { showWarning("无法打开 Codex，请确认应用已安装") }
+            else { warning = nil; statusItem?.menu = makeMenu() }
         }
     }
     @objc private func togglePanel(_: Any?) {
@@ -93,150 +90,106 @@ final class LumeAppDelegate: NSObject, NSApplicationDelegate {
             preferences.launchAtLogin = launchAtLogin.isEnabled
             warning = nil
         } catch {
-            showWarning("Launch at login unavailable")
+            showWarning("登录启动设置失败，请在系统设置中检查登录项")
         }
         preferencesStore.save(preferences)
         statusItem?.menu = makeMenu()
         updatePresentation()
     }
     @objc private func quit(_: Any?) { NSApp.terminate(nil) }
-    @objc private func enableSolControl(_: Any?) {
-        guard let bridge = solControlBridge else { showWarning("联动资源不可用"); return }
-        Task { [weak self] in
-            guard let self else { return }
-            if await bridge.install() {
-                await refreshSolControlStatusAsync()
-                showWarning("Sol Control 联动已启用", beep: false)
-            } else {
-                showWarning("Sol Control 联动安装失败")
-            }
+    func menuWillOpen(_ menu: NSMenu) {
+        openMenu = menu
+        let latest = makeMenu()
+        menu.removeAllItems()
+        for item in latest.items {
+            latest.removeItem(item)
+            menu.addItem(item)
         }
+        refresh(reason: .menu)
     }
-    @objc private func setSolControlOpenAI(_: Any?) { setSolControlMode(.openai) }
-    @objc private func setSolControlQuotaSave(_: Any?) { setSolControlMode(.quotaSave) }
-    @objc private func checkSolControlStatus(_: Any?) { refreshSolControlStatus() }
 
-    private func setSolControlMode(_ mode: SolControlConfiguredMode) {
-        guard let bridge = solControlBridge else { showWarning("联动资源不可用"); return }
-        Task { [weak self] in
-            guard let self else { return }
-            guard let resolution = await bridge.setMode(mode) else { showWarning("Sol Control 设置失败"); return }
-            solControlResolution = resolution
-            await refreshSolControlStatusAsync()
-        }
+    func menuDidClose(_ menu: NSMenu) {
+        openMenu = nil
     }
 
     private func makeMenu() -> NSMenu {
-        let model = LumeMenuPresentation(state: state, panelVisible: panel?.isVisible == true, refreshStatus: refreshStatus, launchAtLogin: launchAtLogin.isEnabled, lastUpdateAt: lastUpdateAt, now: Date())
+        let model = LumeMenuPresentation(state: state, panelVisible: panel?.isVisible == true, now: Date(), warning: warning)
         let menu = NSMenu()
-        for (index, entry) in model.items.enumerated() {
-            let item: NSMenuItem
-            switch index {
-            case 3: item = menu.addItem(withTitle: entry.title, action: #selector(openCodex(_:)), keyEquivalent: ""); item.target = self
-            case 4: item = menu.addItem(withTitle: entry.title, action: #selector(togglePanel(_:)), keyEquivalent: ""); item.target = self
-            case 5: item = menu.addItem(withTitle: entry.title, action: #selector(refresh(_:)), keyEquivalent: ""); item.target = self
-            case 6:
-                item = menu.addItem(withTitle: entry.title, action: #selector(toggleLaunchAtLogin(_:)), keyEquivalent: "")
-                item.target = self
-                item.state = launchAtLogin.isEnabled ? .on : .off
-            case 7:
-                item = menu.addItem(withTitle: entry.title, action: nil, keyEquivalent: "")
-                item.submenu = makeSolControlMenu()
-            case 8: item = menu.addItem(withTitle: entry.title, action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: ""); item.target = NSApp
-            case 9: item = menu.addItem(withTitle: entry.title, action: #selector(quit(_:)), keyEquivalent: "q"); item.target = self
-            default: item = menu.addItem(withTitle: entry.title, action: nil, keyEquivalent: "")
+        menu.delegate = self
+        for entry in model.items {
+            let action: Selector?
+            switch entry.action {
+            case .openCodex: action = #selector(openCodex(_:))
+            case .togglePanel: action = #selector(togglePanel(_:))
+            case .refresh: action = #selector(refresh(_:))
+            case .launchAtLogin: action = #selector(toggleLaunchAtLogin(_:))
+            case .about: action = #selector(NSApplication.orderFrontStandardAboutPanel(_:))
+            case .quit: action = #selector(quit(_:))
+            case .info: action = nil
             }
+            let item = menu.addItem(withTitle: entry.title, action: action, keyEquivalent: entry.action == .quit ? "q" : "")
+            item.target = entry.action == .about ? NSApp : self
+            if entry.action == .launchAtLogin { item.state = launchAtLogin.isEnabled ? .on : .off }
         }
         return menu
     }
 
-    private func makeSolControlMenu() -> NSMenu {
-        let menu = NSMenu()
-        guard solControlBridge != nil, let doctor = solControlDoctor else {
-            let status = menu.addItem(withTitle: "联动不可用", action: nil, keyEquivalent: "")
-            status.isEnabled = false
-            let enable = menu.addItem(withTitle: "启用 Sol Control 联动…", action: #selector(enableSolControl(_:)), keyEquivalent: "")
-            enable.target = self
-            return menu
+    private func activity(now: Date) -> CodexActivity {
+        guard !NSRunningApplication.runningApplications(withBundleIdentifier: CodexHandoff.bundleIdentifier).isEmpty else { return .stopped }
+        if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == CodexHandoff.bundleIdentifier {
+            lastCodexActiveAt = now
+            return .active
         }
-        let configured = ["helper", "skill"].allSatisfy { doctor.checks[$0] == true }
-        guard configured, let resolution = solControlResolution else {
-            let status = menu.addItem(withTitle: "联动未安装", action: nil, keyEquivalent: "")
-            status.isEnabled = false
-            let enable = menu.addItem(withTitle: "启用 Sol Control 联动…", action: #selector(enableSolControl(_:)), keyEquivalent: "")
-            enable.target = self
-            return menu
-        }
-        let statusTitle = doctor.available ? solControlStatusTitle(resolution) : "Sol Control 状态待检查"
-        let current = menu.addItem(withTitle: statusTitle, action: nil, keyEquivalent: "")
-        current.isEnabled = false
-        menu.addItem(.separator())
-        let entries: [(String, SolControlConfiguredMode, Selector)] = [
-            ("OpenAI", .openai, #selector(setSolControlOpenAI(_:))),
-            ("quota-save", .quotaSave, #selector(setSolControlQuotaSave(_:))),
-        ]
-        for (title, mode, action) in entries {
-            let item = menu.addItem(withTitle: title, action: action, keyEquivalent: "")
-            item.target = self
-            item.state = resolution.configuredMode == mode.rawValue ? .on : .off
-        }
-        menu.addItem(.separator())
-        let check = menu.addItem(withTitle: "检查状态", action: #selector(checkSolControlStatus(_:)), keyEquivalent: "")
-        check.target = self
-        return menu
+        return now.timeIntervalSince(lastCodexActiveAt) < 300 ? .active : .background
     }
 
-    private func solControlStatusTitle(_ resolution: SolControlResolution) -> String {
-        switch resolution.configuredMode {
-        case SolControlConfiguredMode.openai.rawValue:
-            return "当前模式：OpenAI"
-        case SolControlConfiguredMode.quotaSave.rawValue:
-            return "当前模式：quota-save"
-        default:
-            return "当前模式：OpenAI"
+    @objc private func applicationActivityChanged(_ notification: Notification) {
+        guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+              app.bundleIdentifier == CodexHandoff.bundleIdentifier else { return }
+        if notification.name == NSWorkspace.didActivateApplicationNotification {
+            lastCodexActiveAt = Date()
+            refresh(reason: .activation)
+        } else {
+            Task { await scheduleRefresh() }
         }
+    }
+
+    private func scheduleRefresh() async {
+        guard let coordinator else { return }
+        let now = Date()
+        let resets = [state.fiveHour.resetsAt, state.sevenDay.resetsAt].compactMap { $0 }
+        let delay = await coordinator.nextDelay(now: now, activity: activity(now: now), resets: resets)
+        refreshTimer?.invalidate()
+        let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
+            Task { @MainActor in self?.refresh(reason: .timer) }
+        }
+        timer.tolerance = min(5, delay / 10)
+        RunLoop.main.add(timer, forMode: .common)
+        refreshTimer = timer
     }
 
     private func refresh(reason: RefreshReason) {
+        guard !refreshing else { return }
+        refreshing = true
         Task { [weak self] in
             guard let self, let coordinator else { return }
             let result = await coordinator.refresh(now: Date(), reason: reason)
-            refreshStatus = result.status
-            if result.status == .throttled {
-                if lastUpdateAt == nil { lastUpdateAt = result.observedAt }
-                statusItem?.menu = makeMenu()
-                return
+            if result.status != .throttled {
+                state.apply(result)
+                preferences.state = state
+                LumeLog.record(result)
+                preferencesStore.save(preferences)
             }
-            state.apply(result)
-            lastUpdateAt = result.observedAt
-            preferences.state = state
-            if result.status == .success { warning = nil }
-            else { showWarning("Usage update unavailable", beep: false) }
-            LumeLog.record(result)
-            preferencesStore.save(preferences)
-            statusItem?.menu = makeMenu()
+            if let openMenu {
+                let entries = LumeMenuPresentation(state: state, panelVisible: panel?.isVisible == true, now: Date(), warning: warning).items
+                for (item, entry) in zip(openMenu.items, entries) { item.title = entry.title }
+            } else {
+                statusItem?.menu = makeMenu()
+            }
             updatePresentation()
+            refreshing = false
+            await scheduleRefresh()
         }
-    }
-
-    private func refreshSolControlStatus() {
-        Task { [weak self] in await self?.refreshSolControlStatusAsync() }
-    }
-
-    private func refreshSolControlStatusAsync() async {
-        guard let bridge = solControlBridge else {
-            solControlDoctor = nil
-            solControlResolution = nil
-            statusItem?.menu = makeMenu()
-            return
-        }
-        solControlDoctor = await bridge.doctor()
-        if let resolution = solControlDoctor?.resolution {
-            solControlResolution = resolution
-        } else {
-            solControlResolution = await bridge.resolve()
-        }
-        statusItem?.menu = makeMenu()
     }
 
     private func showPanel() {
@@ -323,6 +276,19 @@ final class LumeAppDelegate: NSObject, NSApplicationDelegate {
                     guard let self else { return }
                     NSMenu.popUpContextMenu(self.makeMenu(), with: event, for: view)
                 })
+        }
+        presentationTimer?.invalidate()
+        let now = Date()
+        let transitions = [state.fiveHour, state.sevenDay].flatMap { window -> [Date] in
+            guard let observed = window.lastSuccessfulAt else { return [] }
+            return [observed.addingTimeInterval(120.1), observed.addingTimeInterval(900.1)] + [window.resetsAt].compactMap { $0 }
+        }
+        if let next = transitions.filter({ $0 > now }).min() {
+            let timer = Timer(timeInterval: next.timeIntervalSince(now), repeats: false) { [weak self] _ in
+                Task { @MainActor in self?.updatePresentation() }
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            presentationTimer = timer
         }
     }
 
@@ -456,16 +422,10 @@ final class LumeAppDelegate: NSObject, NSApplicationDelegate {
         )
     }
     private func showWarning(_ message: String, beep: Bool = true) {
-        warningTimer?.invalidate()
         warning = message
         if beep { NSSound.beep() }
+        statusItem?.menu = makeMenu()
         updatePresentation()
-        warningTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: false) { [weak self] _ in
-            Task { @MainActor in
-                self?.warning = nil
-                self?.updatePresentation()
-            }
-        }
     }
 
     private static var templateImage: NSImage {
@@ -492,6 +452,7 @@ private final class LumePanelView: NSView {
     private let pointerReleased: (CGPoint, CGPoint) -> Void
     private let showContextMenu: (NSEvent, NSView) -> Void
     private var startGlobal = CGPoint.zero
+    private var hoverTracking: NSTrackingArea?
     private var displayedFiveHour: CGFloat?
     private var displayedSevenDay: CGFloat?
     private var progressTimer: Timer?
@@ -508,6 +469,19 @@ private final class LumePanelView: NSView {
     }
     required init?(coder: NSCoder) { nil }
     override var acceptsFirstResponder: Bool { true }
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverTracking { removeTrackingArea(hoverTracking) }
+        let tracking = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self)
+        addTrackingArea(tracking)
+        hoverTracking = tracking
+    }
+    override func mouseEntered(with event: NSEvent) {
+        updateAccessibilityAndTooltip(now: Date())
+        displayedFiveHour = state.fiveHour.visiblePercentageExact(at: Date()).map { CGFloat($0) }
+        displayedSevenDay = state.sevenDay.visiblePercentageExact(at: Date()).map { CGFloat($0) }
+        needsDisplay = true
+    }
     override func mouseDown(with event: NSEvent) { startGlobal = globalPoint(event); pointerStarted() }
     override func mouseDragged(with event: NSEvent) { pointerMoved(startGlobal, globalPoint(event)) }
     override func mouseUp(with event: NSEvent) { pointerReleased(startGlobal, globalPoint(event)) }
@@ -550,7 +524,6 @@ private final class LumePanelView: NSView {
             drawCentered(value, y: 20, font: .monospacedDigitSystemFont(ofSize: 10.5, weight: .bold), color: .labelColor)
             drawCentered("5H", y: 11, font: .systemFont(ofSize: 6.5, weight: .medium), color: .secondaryLabelColor)
             if let preview { nsColor(state.fiveHour.color(at: now)).withAlphaComponent(0.35).setFill(); NSBezierPath(rect: NSRect(x: preview == .left ? 0 : 44, y: 0, width: 4, height: 48)).fill() }
-            if warning != nil { NSColor.systemOrange.setFill(); NSBezierPath(ovalIn: NSRect(x: 3, y: 41, width: 4, height: 4)).fill() }
             NSGraphicsContext.restoreGraphicsState()
         case .rail(let dockSide):
             let edgeX: CGFloat = dockSide == .left ? 0 : 21
@@ -559,7 +532,6 @@ private final class LumePanelView: NSView {
             drawRail(x: contentX, width: 6, percentage: displayedFiveHour, window: state.fiveHour, now: now)
             let indicatorX: CGFloat = dockSide == .left ? 12 : 8
             if state.fiveHour.isStale(at: now) || state.sevenDay.isStale(at: now) { NSColor.systemOrange.setFill(); NSBezierPath(ovalIn: NSRect(x: indicatorX, y: 57, width: 4, height: 4)).fill() }
-            if warning != nil { NSColor.systemOrange.setFill(); NSBezierPath(ovalIn: NSRect(x: indicatorX, y: 3, width: 4, height: 4)).fill() }
         }
     }
 
@@ -617,16 +589,14 @@ private final class LumePanelView: NSView {
     }
 
     private func updateAccessibilityAndTooltip(now: Date) {
-        let five = state.fiveHour.visiblePercentageExact(at: now).map { String(format: "%.1f%%", $0) } ?? "不可用"
-        let seven = state.sevenDay.visiblePercentageExact(at: now).map { String(format: "%.1f%%", $0) } ?? "不可用"
-        let text = "Codex 5H \(five)，7D \(seven)"
+        let text = UsageText.tooltip(state: state, now: now)
         setAccessibilityLabel(text)
-        toolTip = text
+        toolTip = [text, warning].compactMap { $0 }.joined(separator: "\n")
     }
     private static func accessibilityHelp(for visual: PanelVisual) -> String {
         switch visual {
-        case .ring: return "Click to open Codex; drag to move or dock"
-        case .rail: return "Click to expand; drag inward forty points to expand"
+        case .ring: return "单击打开 Codex；拖动移动或贴边"
+        case .rail: return "单击展开；沿边缘拖动移动，向内拖动展开"
         }
     }
     private func drawCentered(_ string: String, y: CGFloat, font: NSFont, color: NSColor) {

@@ -9,7 +9,9 @@ Lume 是一个轻量的 macOS Codex 额度伴侣。它常驻菜单栏，不显�
 - 竖条可沿屏幕边缘上下拖动，单击后在当前位置向屏幕内展开为圆环。
 - 单击圆环可将 Codex 窗口带到前台。
 - 菜单栏提供额度刷新、浮窗显示、登录启动和退出操作。
-- 可选 Sol Control 模式选择：在菜单栏或明确的自然语言指令中持久选择 `openai` 或 `quota-save`。
+- 每个额度窗口独立显示上次成功读取时间；缓存以低透明度显示，重置时间到达或超过十五分钟后显示不可用。
+- 5H 显示重置倒计时，7D 显示日期与时间；悬停查看完整时间与读取状态。
+- 根据 Codex 活动调整刷新频率：使用时约一分钟，后台闲置五分钟，退出后十五分钟。连续失败时逐步延长重试间隔，手动刷新冷却十秒。
 
 ## 系统要求
 
@@ -23,7 +25,6 @@ Lume 是一个轻量的 macOS Codex 额度伴侣。它常驻菜单栏，不显�
 ```bash
 swift run LumeTests
 swift build -c release
-tests/sol-control/test-lume-integration.sh
 tests/packaging/test-lume-verifier.sh
 scripts/build-lume.sh
 ```
@@ -33,21 +34,15 @@ scripts/build-lume.sh
 - `Lume.app`
 - `Lume.dmg`
 
-## Sol Control 模式选择
+## 额度来源
 
-Lume 菜单提供 `openai` 与 `quota-save` 两种持久模式。Sol Control 在创建每个新 worker 前读取 `~/.codex/sol-control-policy.json`；明确限定“这次”或“本轮”的指令只影响当次调用。
+Lume 从 Codex app-server 读取 Codex 额度桶内的 5H 与 7D 窗口，并兼容旧版单桶响应。无法确认额度归属时显示读取状态，保留有明确新鲜度标记的有效缓存。
 
-安装脚本随 App 一同打包，也可从源码运行：
-
-```bash
-integrations/sol-control/install.sh
-```
-
-架构决策见 [ADR 0008](docs/adr/0008-use-user-selected-sol-control-modes.md)。
+设计决策见 [ADR 0009](docs/adr/0009-trustworthy-quota-companion.md)。
 
 ## 隐私
 
-Lume 在本机读取 Codex app-server 的额度数据，不包含遥测、自动更新器、Tessalume 主题运行时、.NET Helper 或 Windows 组件。
+额度查询通过本机 Codex app-server 完成，认证由 Codex 管理。Lume 将浮窗位置与额度缓存保存在本机偏好设置中。
 
 ## 许可证
 

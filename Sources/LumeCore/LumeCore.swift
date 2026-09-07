@@ -181,19 +181,16 @@ public struct UsageWindowSnapshot: Sendable, Equatable {
 
 public struct UsageReadResult: Sendable, Equatable {
     public let status: UsageReadStatus
+    public let sourceID: String?
     public let fiveHour: UsageWindowSnapshot?
     public let sevenDay: UsageWindowSnapshot?
     public let observedAt: Date
     public let failureCode: UsageFailureCode
     public let duration: TimeInterval
 
-    // Compatibility accessors keep integrations built against Lume 1.1 reading 7D.
-    public var remainingPercentage: Int? { sevenDay?.remainingPercentage }
-    public var remainingPercentageExact: Double? { sevenDay?.remainingPercentageExact }
-    public var resetsAt: Date? { sevenDay?.resetsAt }
-
-    public init(status: UsageReadStatus, fiveHour: UsageWindowSnapshot?, sevenDay: UsageWindowSnapshot?, observedAt: Date, failureCode: UsageFailureCode = .none, duration: TimeInterval = 0) {
+    public init(status: UsageReadStatus, sourceID: String? = nil, fiveHour: UsageWindowSnapshot?, sevenDay: UsageWindowSnapshot?, observedAt: Date, failureCode: UsageFailureCode = .none, duration: TimeInterval = 0) {
         self.status = status
+        self.sourceID = sourceID
         self.fiveHour = fiveHour
         self.sevenDay = sevenDay
         self.observedAt = observedAt
@@ -201,16 +198,7 @@ public struct UsageReadResult: Sendable, Equatable {
         self.duration = duration
     }
 
-    public init(status: UsageReadStatus, remainingPercentage: Int?, remainingPercentageExact: Double? = nil, resetsAt: Date? = nil, observedAt: Date, failureCode: UsageFailureCode = .none, duration: TimeInterval = 0) {
-        self.status = status
-        fiveHour = nil
-        sevenDay = (remainingPercentageExact ?? remainingPercentage.map(Double.init)).map {
-            UsageWindowSnapshot(remainingPercentageExact: $0, resetsAt: resetsAt)
-        }
-        self.observedAt = observedAt
-        self.failureCode = failureCode
-        self.duration = duration
-    }
+
 }
 
 public protocol UsageReader: Sendable { func read() async -> UsageReadResult }
@@ -231,8 +219,8 @@ public struct UsageWindowState: Codable, Equatable, Sendable {
     public var remainingPercentage: Int? { remainingPercentageExact.map { Int($0.rounded()) } }
     public var displayValue: String { remainingPercentage.map(String.init) ?? "--" }
     public func presentationState(at now: Date) -> UsagePresentationState {
-        guard let remainingPercentage, let lastSuccessfulAt, now.timeIntervalSince(lastSuccessfulAt) <= LumeState.staleAfter else { return .unavailable }
-        return lastStatus == .success ? .fresh(remainingPercentage) : .stale(remainingPercentage)
+        guard let remainingPercentage, let lastSuccessfulAt, now.timeIntervalSince(lastSuccessfulAt) >= 0, now.timeIntervalSince(lastSuccessfulAt) <= LumeState.staleAfter, resetsAt.map({ now < $0 }) ?? true else { return .unavailable }
+        return lastStatus == .success && now.timeIntervalSince(lastSuccessfulAt) <= 120 ? .fresh(remainingPercentage) : .stale(remainingPercentage)
     }
     public func isStale(at now: Date) -> Bool { if case .stale = presentationState(at: now) { return true }; return false }
     public func visiblePercentage(at now: Date) -> Int? { switch presentationState(at: now) { case .fresh(let value), .stale(let value): return value; case .unavailable: return nil } }
@@ -250,6 +238,8 @@ public struct UsageWindowState: Codable, Equatable, Sendable {
 
 public struct LumeState: Codable, Equatable, Sendable {
     public static let staleAfter: TimeInterval = 15 * 60
+    public var sourceID: String?
+    public var latestReadStatus: UsageReadStatus = .failed
     public var fiveHour: UsageWindowState
     public var sevenDay: UsageWindowState
     public var presentation: LumePresentation
@@ -262,29 +252,15 @@ public struct LumeState: Codable, Equatable, Sendable {
         self.presentation = presentation
     }
 
-    public init(remainingPercentage: Int?, lastSuccessfulAt: Date?, lastStatus: UsageReadStatus, presentation: LumePresentation = .ring) {
-        fiveHour = UsageWindowState()
-        sevenDay = UsageWindowState(remainingPercentageExact: remainingPercentage.map(Double.init), lastSuccessfulAt: lastSuccessfulAt, lastStatus: lastStatus)
-        self.presentation = presentation
-    }
-
-    // Compatibility accessors represent the historical 7D surface.
-    public var remainingPercentage: Int? { sevenDay.remainingPercentage }
-    public var lastSuccessfulAt: Date? { [fiveHour.lastSuccessfulAt, sevenDay.lastSuccessfulAt].compactMap { $0 }.max() }
-    public var lastStatus: UsageReadStatus { sevenDay.lastStatus }
-    public var displayValue: String { sevenDay.displayValue }
-    public func presentationState(at now: Date) -> UsagePresentationState { sevenDay.presentationState(at: now) }
-    public func isStale(at now: Date) -> Bool { sevenDay.isStale(at: now) }
-    public func visiblePercentage(at now: Date) -> Int? { sevenDay.visiblePercentage(at: now) }
-    public func color(at now: Date) -> LumeColor { sevenDay.color(at: now) }
-
     private enum CodingKeys: String, CodingKey {
-        case fiveHour, sevenDay, presentation
+        case fiveHour, sevenDay, presentation, sourceID, latestReadStatus
         case remainingPercentage, lastSuccessfulAt, lastStatus
     }
 
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
+        sourceID = try values.decodeIfPresent(String.self, forKey: .sourceID)
+        latestReadStatus = try values.decodeIfPresent(UsageReadStatus.self, forKey: .latestReadStatus) ?? .failed
         presentation = try values.decodeIfPresent(LumePresentation.self, forKey: .presentation) ?? .ring
         fiveHour = try values.decodeIfPresent(UsageWindowState.self, forKey: .fiveHour) ?? UsageWindowState()
         if let current = try values.decodeIfPresent(UsageWindowState.self, forKey: .sevenDay) {
@@ -299,32 +275,77 @@ public struct LumeState: Codable, Equatable, Sendable {
 
     public func encode(to encoder: Encoder) throws {
         var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encodeIfPresent(sourceID, forKey: .sourceID)
+        try values.encode(latestReadStatus, forKey: .latestReadStatus)
         try values.encode(fiveHour, forKey: .fiveHour)
         try values.encode(sevenDay, forKey: .sevenDay)
         try values.encode(presentation, forKey: .presentation)
     }
 
     public mutating func apply(_ result: UsageReadResult) {
+        guard result.status != .throttled else { return }
+        latestReadStatus = result.status
+        if result.status == .success, sourceID != result.sourceID {
+            fiveHour = UsageWindowState()
+            sevenDay = UsageWindowState()
+            sourceID = result.sourceID
+        }
         fiveHour.apply(result.fiveHour, status: result.status, observedAt: result.observedAt)
         sevenDay.apply(result.sevenDay, status: result.status, observedAt: result.observedAt)
     }
 }
 
-public enum RefreshReason: Sendable { case launch, manual, wake, unlock, timer }
+public enum RefreshReason: Sendable { case launch, manual, wake, unlock, timer, menu, activation }
+
+public enum CodexActivity: Sendable { case active, background, stopped }
+
+public enum RefreshSchedule {
+    public static func interval(activity: CodexActivity, failures: Int) -> TimeInterval {
+        let base: TimeInterval
+        switch activity {
+        case .active: base = 60
+        case .background: base = 300
+        case .stopped: base = 900
+        }
+        return min(900, base * pow(2, Double(min(4, failures))))
+    }
+
+    public static func delay(now: Date, activity: CodexActivity, failures: Int, resets: [Date]) -> TimeInterval {
+        let interval = interval(activity: activity, failures: failures)
+        guard failures == 0, let reset = resets.filter({ $0 > now }).min() else { return interval }
+        return max(10, min(interval, reset.timeIntervalSince(now) + 2))
+    }
+}
 
 public actor UsageRefreshCoordinator {
-    public static let minimumInterval: TimeInterval = 60
     private let reader: any UsageReader
     private var lastAttemptAt: Date?
+    private var inFlight = false
+    private var failures = 0
 
     public init(reader: any UsageReader) { self.reader = reader }
 
-    public func refresh(now: Date, reason _: RefreshReason) async -> UsageReadResult {
-        if let lastAttemptAt, now.timeIntervalSince(lastAttemptAt) < Self.minimumInterval {
-            return UsageReadResult(status: .throttled, remainingPercentage: nil, observedAt: lastAttemptAt)
+    public func refresh(now: Date, reason: RefreshReason) async -> UsageReadResult {
+        let cooldown: TimeInterval
+        switch reason {
+        case .manual, .wake, .unlock, .activation: cooldown = 10
+        case .menu: cooldown = 60
+        case .timer: cooldown = 10
+        case .launch: cooldown = 10
         }
+        if inFlight || lastAttemptAt.map({ now.timeIntervalSince($0) < cooldown }) == true {
+            return UsageReadResult(status: .throttled, fiveHour: nil, sevenDay: nil, observedAt: now)
+        }
+        inFlight = true
         lastAttemptAt = now
-        return await reader.read()
+        let result = await reader.read()
+        inFlight = false
+        failures = result.status == .success ? 0 : min(4, failures + 1)
+        return result
+    }
+
+    public func nextDelay(now: Date, activity: CodexActivity, resets: [Date]) -> TimeInterval {
+        RefreshSchedule.delay(now: now, activity: activity, failures: failures, resets: resets)
     }
 }
 
@@ -339,49 +360,6 @@ public struct LumePreferences: Codable, Equatable, Sendable {
 
     public init(state: LumeState, panelOrigin: CGPoint = .zero, screenIdentifier: String? = nil, dockSide: DockSide? = nil, isPanelVisible: Bool = true, launchAtLogin: Bool = false) {
         self.state = state; panelOriginX = panelOrigin.x; panelOriginY = panelOrigin.y; self.screenIdentifier = screenIdentifier; self.dockSide = dockSide; self.isPanelVisible = isPanelVisible; self.launchAtLogin = launchAtLogin
-    }
-}
-
-public struct LumeMenuItem: Equatable, Sendable { public let title: String; public init(_ title: String) { self.title = title } }
-public struct LumeMenuPresentation: Sendable {
-    public let items: [LumeMenuItem]
-    public init(state: LumeState, panelVisible: Bool, refreshStatus: UsageReadStatus, launchAtLogin _: Bool, lastUpdateAt: Date? = nil, now: Date) {
-        let status: String
-        switch refreshStatus {
-        case .success: status = lastUpdateAt.map { "更新于 \(Self.relativeAge(now.timeIntervalSince($0)))" } ?? "额度已更新"
-        case .throttled: status = lastUpdateAt.map { "更新于 \(Self.relativeAge(now.timeIntervalSince($0)))" } ?? "等待刷新"
-        case .executableNotFound: status = "Codex 不可用"
-        case .timedOut: status = "额度读取超时"
-        default: status = "额度暂不可用"
-        }
-        items = [
-            LumeMenuItem(Self.usageTitle(label: "5H", window: state.fiveHour, now: now)),
-            LumeMenuItem(Self.usageTitle(label: "7D", window: state.sevenDay, now: now)),
-            LumeMenuItem(status),
-            LumeMenuItem("打开 Codex"),
-            LumeMenuItem(panelVisible ? "隐藏额度浮窗" : "显示额度浮窗"),
-            LumeMenuItem("刷新额度"),
-            LumeMenuItem("登录时启动"),
-            LumeMenuItem("Sol Control"),
-            LumeMenuItem("关于 Lume"),
-            LumeMenuItem("退出 Lume"),
-        ]
-    }
-
-    private static func usageTitle(label: String, window: UsageWindowState, now: Date) -> String {
-        guard let exact = window.visiblePercentageExact(at: now) else { return "\(label) 额度：--" }
-        let percentage = exact.rounded() == exact ? String(Int(exact)) : String(format: "%.1f", exact)
-        guard let reset = window.resetsAt else { return "\(label) 额度：\(percentage)%" }
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_CN")
-        formatter.dateFormat = "HH:mm"
-        return "\(label) 额度：\(percentage)% · 重置于 \(formatter.string(from: reset))"
-    }
-
-    private static func relativeAge(_ interval: TimeInterval) -> String {
-        let seconds = max(0, Int(interval.rounded(.down)))
-        if seconds < 60 { return "\(seconds) 秒前" }
-        return "\(seconds / 60) 分钟前"
     }
 }
 
@@ -457,6 +435,7 @@ public struct CodexAppServerUsageReader: UsageReader {
             guard windows.fiveHour != nil || windows.sevenDay != nil else { return failed(.protocolError, .resultMissing, started) }
             return UsageReadResult(
                 status: .success,
+                sourceID: windows.sourceID,
                 fiveHour: windows.fiveHour,
                 sevenDay: windows.sevenDay,
                 observedAt: started,
@@ -468,7 +447,7 @@ public struct CodexAppServerUsageReader: UsageReader {
         catch { return failed(.invalidJSON, .invalidJSON, started) }
     }
 
-    private func failed(_ status: UsageReadStatus, _ code: UsageFailureCode, _ started: Date) -> UsageReadResult { UsageReadResult(status: status, remainingPercentage: nil, observedAt: started, failureCode: code, duration: now().timeIntervalSince(started)) }
+    private func failed(_ status: UsageReadStatus, _ code: UsageFailureCode, _ started: Date) -> UsageReadResult { UsageReadResult(status: status, fiveHour: nil, sevenDay: nil, observedAt: started, failureCode: code, duration: now().timeIntervalSince(started)) }
 
     private enum Response { case message([String: Any]), serverError, processExited }
     private func response(id: Int, from transport: any AppServerTransport, deadline: Date) async throws -> Response {
@@ -519,19 +498,17 @@ public struct CodexAppServerUsageReader: UsageReader {
         return ["codexHome", "platformFamily", "platformOs", "userAgent"].allSatisfy { (result[$0] as? String)?.isEmpty == false }
     }
 
-    private func normalizeWindows(_ value: Any) -> (fiveHour: UsageWindowSnapshot?, sevenDay: UsageWindowSnapshot?) {
-        guard let response = value as? [String: Any], let result = response["result"] as? [String: Any] else { return (nil, nil) }
-        var candidates = [[String: Any]]()
-        if let direct = result["rateLimits"] as? [String: Any] { candidates.append(direct) }
-        if let buckets = result["rateLimitsByLimitId"] as? [String: Any] {
-            let orderedKeys = buckets.keys.sorted { lhs, rhs in
-                if lhs == "codex" { return true }
-                if rhs == "codex" { return false }
-                return lhs < rhs
-            }
-            candidates.append(contentsOf: orderedKeys.compactMap { buckets[$0] as? [String: Any] })
-        }
-        if candidates.isEmpty { candidates.append(result) }
+    private func normalizeWindows(_ value: Any) -> (fiveHour: UsageWindowSnapshot?, sevenDay: UsageWindowSnapshot?, sourceID: String?) {
+        guard let response = value as? [String: Any], let result = response["result"] as? [String: Any] else { return (nil, nil, nil) }
+        let selected: [String: Any]
+        if let buckets = result["rateLimitsByLimitId"] as? [String: Any], !buckets.isEmpty {
+            guard let codex = buckets["codex"] as? [String: Any] else { return (nil, nil, nil) }
+            selected = codex
+        } else if let direct = result["rateLimits"] as? [String: Any] {
+            if let id = direct["limitId"] as? String, id != "codex" { return (nil, nil, nil) }
+            selected = direct
+        } else { return (nil, nil, nil) }
+        let candidates = [selected]
         let windows = candidates.flatMap { limits in ["primary", "secondary"].compactMap { name -> (duration: Int, remaining: Double, resetsAt: Date?)? in
             guard let window = limits[name] as? [String: Any],
                   let used = finiteNumber(window["usedPercent"]),
@@ -549,7 +526,7 @@ public struct CodexAppServerUsageReader: UsageReader {
                 UsageWindowSnapshot(remainingPercentageExact: $0.remaining, resetsAt: $0.resetsAt)
             }
         }
-        return (snapshot(duration: 300), snapshot(duration: 10_080))
+        return (snapshot(duration: 300), snapshot(duration: 10_080), "codex")
     }
     private func finiteNumber(_ value: Any?) -> Double? {
         guard let number = value as? NSNumber else { return nil }
@@ -687,7 +664,7 @@ public struct DiscoveredCodexUsageReader: UsageReader {
     public init(locator: any CodexExecutableLocating = SystemCodexExecutableLocator(), now: @escaping @Sendable () -> Date = { Date() }) { self.locator = locator; self.now = now }
     public func read() async -> UsageReadResult {
         guard let executable = locator.locate() else {
-            return UsageReadResult(status: .executableNotFound, remainingPercentage: nil, observedAt: now(), failureCode: .executableNotFound)
+            return UsageReadResult(status: .executableNotFound, fiveHour: nil, sevenDay: nil, observedAt: now(), failureCode: .executableNotFound)
         }
         return await CodexAppServerUsageReader(factory: ProcessAppServerTransportFactory(executableURL: executable), now: now).read()
     }
@@ -716,96 +693,6 @@ public final class LumePreferencesStore: @unchecked Sendable {
     public func save(_ preferences: LumePreferences) {
         defaults.set(try? JSONEncoder().encode(preferences), forKey: key)
         defaults.set(true, forKey: geometryVersionKey)
-    }
-}
-
-public enum SolControlConfiguredMode: String, Codable, CaseIterable, Sendable {
-    case openai
-    case quotaSave = "quota-save"
-}
-
-public struct SolControlResolution: Codable, Equatable, Sendable {
-    public let mode: String
-    public let configuredMode: String
-    public let source: String
-    public let remainingPercentage: Double?
-    public let signalStatus: String
-    public let reason: String
-}
-
-public struct SolControlDoctor: Codable, Equatable, Sendable {
-    public let available: Bool
-    public let checks: [String: Bool]
-    public let resolution: SolControlResolution
-}
-
-public struct SolControlBridge: Sendable {
-    public let helperURL: URL
-    public let installerURL: URL
-
-    public init(helperURL: URL, installerURL: URL) {
-        self.helperURL = helperURL
-        self.installerURL = installerURL
-    }
-
-    public static func bundled(resourceURL: URL?) -> SolControlBridge? {
-        guard let directory = resourceURL?.appendingPathComponent("SolControlIntegration", isDirectory: true) else { return nil }
-        let helper = directory.appendingPathComponent("lume_policy.py")
-        let installer = directory.appendingPathComponent("install.sh")
-        guard FileManager.default.isReadableFile(atPath: helper.path),
-              FileManager.default.isReadableFile(atPath: installer.path)
-        else { return nil }
-        return SolControlBridge(helperURL: helper, installerURL: installer)
-    }
-
-    public func resolve() async -> SolControlResolution? {
-        guard let data = await run(executable: URL(fileURLWithPath: "/usr/bin/python3"), arguments: [helperURL.path, "resolve"]) else { return nil }
-        return try? JSONDecoder().decode(SolControlResolution.self, from: data)
-    }
-
-    public func doctor() async -> SolControlDoctor? {
-        guard let data = await run(executable: URL(fileURLWithPath: "/usr/bin/python3"), arguments: [helperURL.path, "doctor"]) else { return nil }
-        return try? JSONDecoder().decode(SolControlDoctor.self, from: data)
-    }
-
-    public func setMode(_ mode: SolControlConfiguredMode) async -> SolControlResolution? {
-        guard await run(executable: URL(fileURLWithPath: "/usr/bin/python3"), arguments: [helperURL.path, "set-mode", mode.rawValue]) != nil else { return nil }
-        return await resolve()
-    }
-
-    public func install() async -> Bool {
-        await run(executable: URL(fileURLWithPath: "/bin/bash"), arguments: [installerURL.path]) != nil
-    }
-
-    private func run(executable: URL, arguments: [String]) async -> Data? {
-        await Task.detached(priority: .utility) {
-            Self.runSynchronously(executable: executable, arguments: arguments)
-        }.value
-    }
-
-    private static func runSynchronously(executable: URL, arguments: [String]) -> Data? {
-        let process = Process()
-        let output = Pipe()
-        let error = Pipe()
-        process.executableURL = executable
-        process.arguments = arguments
-        process.standardOutput = output
-        process.standardError = error
-        do {
-            let finished = DispatchSemaphore(value: 0)
-            process.terminationHandler = { _ in finished.signal() }
-            try process.run()
-            guard finished.wait(timeout: .now() + 3) == .success else {
-                process.terminate()
-                _ = finished.wait(timeout: .now() + 1)
-                return nil
-            }
-            let data = output.fileHandleForReading.readDataToEndOfFile()
-            _ = error.fileHandleForReading.readDataToEndOfFile()
-            return process.terminationStatus == 0 && data.count <= 4096 ? data : nil
-        } catch {
-            return nil
-        }
     }
 }
 
